@@ -219,3 +219,38 @@ fn without_russian_layout_nothing_is_replaced_and_status_says_so() {
         replaced("привет ", 6, ghbdtn_then(K::Space), &ru)
     );
 }
+
+#[test]
+fn delete_inside_the_word_blocks_correction() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine(vec![us.clone(), ru.clone()]);
+    let c = ctx(&us);
+    type_text(&mut e, &c, &us, "ghbdtn");
+    press(&mut e, &c, K::Delete, Modifiers::default());
+    assert_eq!(space(&mut e, &c), Outcome::pass());
+    type_text(&mut e, &c, &us, "ghbdtn");
+    assert_eq!(
+        space(&mut e, &c),
+        replaced("привет ", 6, ghbdtn_then(K::Space), &ru)
+    );
+}
+
+#[test]
+fn arrow_key_forgets_the_word() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine(vec![us.clone(), ru.clone()]);
+    let c = ctx(&us);
+    for arrow in [K::ArrowLeft, K::ArrowRight, K::ArrowUp, K::ArrowDown] {
+        type_text(&mut e, &c, &us, "ghbdtn");
+        assert_eq!(
+            press(&mut e, &c, arrow, Modifiers::default()),
+            Outcome::pass()
+        );
+        assert_eq!(space(&mut e, &c), Outcome::pass(), "{arrow}");
+    }
+    type_text(&mut e, &c, &us, "ghbdtn");
+    assert_eq!(
+        space(&mut e, &c),
+        replaced("привет ", 6, ghbdtn_then(K::Space), &ru)
+    );
+}

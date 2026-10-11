@@ -77,11 +77,11 @@ pub fn ru_win() -> LayoutMap {
 }
 
 pub fn engine(layouts: Vec<LayoutMap>) -> Engine {
-    Engine::new(
-        Config::default_for(Os::MacOs),
-        Lexicon::embedded(),
-        LayoutSet(layouts),
-    )
+    engine_with(Config::default_for(Os::MacOs), layouts)
+}
+
+pub fn engine_with(config: Config, layouts: Vec<LayoutMap>) -> Engine {
+    Engine::new(config, Lexicon::embedded(), LayoutSet(layouts))
 }
 
 pub fn ctx(layout: &LayoutMap) -> Context {
@@ -101,13 +101,81 @@ pub fn shift() -> Modifiers {
 }
 
 fn event(key: PhysicalKey, dir: KeyDir, mods: Modifiers) -> KeyEvent {
+    event_at(key, dir, mods, 0)
+}
+
+/// Событие с временем нажатия (часы ядра — только `time_ms`).
+pub fn event_at(key: PhysicalKey, dir: KeyDir, mods: Modifiers, time_ms: u64) -> KeyEvent {
     KeyEvent {
         key,
         dir,
         mods,
         repeat: false,
-        time_ms: 0,
+        time_ms,
     }
+}
+
+/// Одно событие клавиши в момент `time_ms`.
+pub fn key_at(
+    engine: &mut Engine,
+    ctx: &Context,
+    key: PhysicalKey,
+    dir: KeyDir,
+    mods: Modifiers,
+    time_ms: u64,
+) -> Outcome {
+    engine.on_key(&event_at(key, dir, mods, time_ms), ctx)
+}
+
+/// Нажатие в `time_ms` и отпускание через 30 мс; исходы обоих событий.
+pub fn press_at(
+    engine: &mut Engine,
+    ctx: &Context,
+    key: PhysicalKey,
+    mods: Modifiers,
+    time_ms: u64,
+) -> Vec<Outcome> {
+    vec![
+        key_at(engine, ctx, key, KeyDir::Down, mods, time_ms),
+        key_at(engine, ctx, key, KeyDir::Up, mods, time_ms + 30),
+    ]
+}
+
+/// Одиночный Shift: нажат в `time_ms`, отпущен через 50 мс, без других клавиш.
+pub fn shift_tap(
+    engine: &mut Engine,
+    ctx: &Context,
+    key: PhysicalKey,
+    time_ms: u64,
+) -> Vec<Outcome> {
+    vec![
+        key_at(engine, ctx, key, KeyDir::Down, shift(), time_ms),
+        key_at(
+            engine,
+            ctx,
+            key,
+            KeyDir::Up,
+            Modifiers::default(),
+            time_ms + 50,
+        ),
+    ]
+}
+
+/// Двойной левый Shift: два касания, второе через 150 мс после начала первого.
+pub fn double_shift(engine: &mut Engine, ctx: &Context, time_ms: u64) -> Vec<Outcome> {
+    let mut outcomes = shift_tap(engine, ctx, PhysicalKey::ShiftLeft, time_ms);
+    outcomes.extend(shift_tap(
+        engine,
+        ctx,
+        PhysicalKey::ShiftLeft,
+        time_ms + 150,
+    ));
+    outcomes
+}
+
+/// Все действия из последовательности исходов, по порядку.
+pub fn actions(outcomes: &[Outcome]) -> Vec<Action> {
+    outcomes.iter().flat_map(|o| o.actions.clone()).collect()
 }
 
 /// Нажатие и отпускание клавиши; возвращает исход нажатия.

@@ -49,6 +49,12 @@ impl TokenBuffer {
         }
     }
 
+    /// Слово сконвертировано вручную: дальше оно в раскладке `layout`, автоматика его не трогает.
+    pub(crate) fn relayout(&mut self, layout: LayoutId) {
+        self.layout = Some(layout);
+        self.edited = true;
+    }
+
     pub(crate) fn keys(&self) -> &[(PhysicalKey, Level)] {
         &self.keys
     }

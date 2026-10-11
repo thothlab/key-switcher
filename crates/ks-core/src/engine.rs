@@ -1,12 +1,12 @@
-//! Диспетчер нажатий: жесты (`input`) → буфер токена → решение на границе (`detect`).
+//! Диспетчер нажатий: ручное управление (`input`) → буфер токена → решение на границе (`detect`).
 
 use std::sync::Arc;
 
 use crate::buffer::TokenBuffer;
-use crate::input::InputState;
+use crate::input::{InputState, View};
 use crate::{
     Action, Config, Context, Disposition, EngineStatus, KeyDir, KeyEvent, KeyStroke, Lang,
-    LayoutMap, LayoutSet, Level, Lexicon, Modifiers, Outcome, PhysicalKey, ReplaceKind,
+    LayoutId, LayoutMap, LayoutSet, Level, Lexicon, Modifiers, Outcome, PhysicalKey, ReplaceKind,
     ResetReason, detect,
 };
 
@@ -19,11 +19,11 @@ pub struct Engine {
     input: InputState,
 }
 
-/// Слово буфера, прочитанное в двух раскладках.
-struct Converted {
-    typed: String,
-    converted: String,
-    strokes: Vec<KeyStroke>,
+/// Слово, прочитанное в двух раскладках.
+pub(crate) struct Converted {
+    pub(crate) typed: String,
+    pub(crate) converted: String,
+    pub(crate) strokes: Vec<KeyStroke>,
 }
 
 impl Engine {
@@ -38,51 +38,46 @@ impl Engine {
     }
 
     /// Граница слова (пробел, Enter) при исправлении проглатывается и входит в `Replace`.
+    /// Действия ручного управления (жесты, хоткеи) стоят в `actions` первыми; при
+    /// `Disposition::Pass` бэкенд исполняет их до того, как пропустить само нажатие.
     pub fn on_key(&mut self, ev: &KeyEvent, ctx: &Context) -> Outcome {
-        if let Some(outcome) = self.input.on_key(ev, ctx, &self.config) {
-            return outcome;
-        }
-        if ev.dir == KeyDir::Up || ev.key.is_modifier() {
-            return Outcome::pass();
-        }
         self.buffer.note_app(&ctx.app);
-        if ctx.secure_input || ctx.password_field || ev.mods.ctrl || ev.mods.meta || ev.mods.alt {
-            self.buffer.clear();
-            return Outcome::pass();
+        let view = View {
+            config: &self.config,
+            layouts: &self.layouts,
+            buffer: &self.buffer,
+        };
+        let step = self.input.on_key(ev, ctx, &view);
+        if let Some(layout) = step.relayout {
+            self.buffer.relayout(layout);
         }
-        match ev.key {
-            PhysicalKey::Space | PhysicalKey::Enter => {
-                let outcome = self.decide(ev.key, ev.mods);
-                self.buffer.clear();
-                outcome
-            }
-            PhysicalKey::Backspace => {
-                self.buffer.erase_back();
-                Outcome::pass()
-            }
-            PhysicalKey::Delete => {
-                self.buffer.mark_edited();
-                Outcome::pass()
-            }
-            key if key.is_printable() => {
-                let level = Level::from_mods(ev.mods);
-                let known = self
-                    .layouts
-                    .get(&ctx.layout)
-                    .and_then(|map| map.char_for(key, level))
-                    .is_some();
-                if known {
-                    self.buffer.push(key, level, &ctx.layout);
-                } else {
-                    self.buffer.clear();
-                }
-                Outcome::pass()
-            }
-            _ => {
-                self.buffer.clear();
-                Outcome::pass()
-            }
+        if let Some(disposition) = step.consumed {
+            return Outcome {
+                disposition,
+                actions: step.actions,
+            };
         }
+        let layout = step.switched_to.as_ref().unwrap_or(&ctx.layout);
+        let mut outcome = self.typing(ev, ctx, layout);
+        if !step.actions.is_empty() {
+            let mut actions = step.actions;
+            actions.append(&mut outcome.actions);
+            outcome.actions = actions;
+        }
+        outcome
+    }
+
+    /// Таймер ручного управления: одиночный Shift ждёт `T_double` = 400 мс, не первая ли это
+    /// половина двойного. Бэкенд зовёт `tick` к моменту `next_deadline()` — в тех же часах,
+    /// что `KeyEvent.time_ms`, — и исполняет вернувшиеся действия. Не позвал — ожидание
+    /// разрешит следующее событие, а переключение уйдёт в его `Outcome`.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
+        self.input.tick(now_ms, &self.config)
+    }
+
+    /// Когда звать `tick`; `None` — ждать нечего.
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.input.deadline()
     }
 
     pub fn on_reset(&mut self, why: ResetReason) {
@@ -98,6 +93,7 @@ impl Engine {
     pub fn set_layouts(&mut self, layouts: LayoutSet) {
         self.layouts = layouts;
         self.buffer.clear();
+        self.input.forget_word();
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -110,13 +106,14 @@ impl Engine {
         }
     }
 
-    /// Набранная форма последнего отменённого исправления. TODO(task 04): запись исправления и отмена.
+    /// Набранная форма последнего отменённого исправления — для пункта «Не исправлять „…“».
     pub fn last_undone(&self) -> Option<&str> {
-        None
+        self.input.last_undone()
     }
 
-    /// Конвертация выделенного текста по таблицам пары: направление — по раскладке,
-    /// в которой букв текста больше. `None` — конвертировать нечего.
+    /// Конвертация выделенного текста по таблицам пары: латинских букв больше, чем
+    /// кириллических, — в русскую раскладку, иначе в английскую; регистр сохраняется.
+    /// `None` — конвертировать нечего (пусто, нет букв, нет пары раскладок).
     pub fn convert_text(&self, text: &str) -> Option<String> {
         let (en, ru) = self.layouts.pair()?;
         let letters = |map: &LayoutMap| {
@@ -124,11 +121,11 @@ impl Engine {
                 .filter(|c| c.is_alphabetic() && map.stroke_for(*c).is_some())
                 .count()
         };
-        let (from, to) = if letters(ru) > letters(en) {
-            (ru, en)
-        } else {
-            (en, ru)
-        };
+        let (latin, cyrillic) = (letters(en), letters(ru));
+        if latin + cyrillic == 0 {
+            return None;
+        }
+        let (from, to) = if latin > cyrillic { (en, ru) } else { (ru, en) };
         let converted: String = text
             .chars()
             .map(|c| {
@@ -141,6 +138,53 @@ impl Engine {
             })
             .collect();
         (converted != text).then_some(converted)
+    }
+
+    /// Обычный набор: буфер слова и решение на границе. `layout` — раскладка, в которой
+    /// печатается нажатие (уже переключённая, если перед ним сработал одиночный Shift).
+    fn typing(&mut self, ev: &KeyEvent, ctx: &Context, layout: &LayoutId) -> Outcome {
+        if ev.dir == KeyDir::Up || ev.key.is_modifier() {
+            return Outcome::pass();
+        }
+        if ctx.secure_input || ctx.password_field || ev.mods.ctrl || ev.mods.meta || ev.mods.alt {
+            self.buffer.clear();
+            return Outcome::pass();
+        }
+        match ev.key {
+            PhysicalKey::Space | PhysicalKey::Enter => {
+                let outcome = self.decide(ev.key, ev.mods);
+                self.input
+                    .word_done(&self.buffer, ev, &ctx.app, &outcome.actions);
+                self.buffer.clear();
+                outcome
+            }
+            PhysicalKey::Backspace => {
+                self.buffer.erase_back();
+                Outcome::pass()
+            }
+            PhysicalKey::Delete => {
+                self.buffer.mark_edited();
+                Outcome::pass()
+            }
+            key if key.is_printable() => {
+                let level = Level::from_mods(ev.mods);
+                let known = self
+                    .layouts
+                    .get(layout)
+                    .and_then(|map| map.char_for(key, level))
+                    .is_some();
+                if known {
+                    self.buffer.push(key, level, layout);
+                } else {
+                    self.buffer.clear();
+                }
+                Outcome::pass()
+            }
+            _ => {
+                self.buffer.clear();
+                Outcome::pass()
+            }
+        }
     }
 
     fn decide(&self, boundary: PhysicalKey, mods: Modifiers) -> Outcome {
@@ -161,6 +205,9 @@ impl Engine {
         let Some(word) = convert_keys(self.buffer.keys(), from, to) else {
             return Outcome::pass();
         };
+        if self.config.words.contains(&word.typed) {
+            return Outcome::pass();
+        }
         if !detect::should_convert(
             &word.typed,
             from.lang,
@@ -197,7 +244,7 @@ impl Engine {
 
 /// Читает нажатия слова в раскладке `from` и в раскладке `to` на тех же уровнях;
 /// `None`, если у какой-то клавиши нет символа в одной из раскладок.
-fn convert_keys(
+pub(crate) fn convert_keys(
     keys: &[(PhysicalKey, Level)],
     from: &LayoutMap,
     to: &LayoutMap,
