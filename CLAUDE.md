@@ -3,6 +3,25 @@
 
 Нативный переключатель раскладки клавиатуры для macOS, Windows и Linux: исправляет текст, набранный не в той раскладке («ghbdtn» -> «привет»), на лету и по горячим клавишам.
 
+## Команды
+
+| Команда | Что делает |
+|---------|------------|
+| `source "$HOME/.cargo/env"` | Подключить Rust: zsh на этой машине сам его не видит |
+| `cargo test -p <crate>` | Тесты крейта; полный набор — `cargo test --workspace` |
+| `cargo clippy -p ks-windows --target x86_64-pc-windows-gnu -- -D warnings` | Проверка компиляции под Windows (так же `x86_64-unknown-linux-gnu` для Linux) |
+| `KS_SIGN_IDENTITY="KeySwitcher Local" sh scripts/macos/build-app.sh` | Собрать и подписать `dist/KeySwitcher.app` |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --status` | Состояние работающего агента: права, перехват, раскладки |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --selftest` | Живая проверка в собственном документе TextEdit (нужны права TCC) |
+| `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания (`docs/eval.md`) |
+
+## Что уже кусалось
+
+- Права TCC привязаны к подписи: собирай с сертификатом «KeySwitcher Local» (`scripts/macos/create-local-cert.sh`), иначе после каждой пересборки права молча слетают.
+- После выдачи прав агента надо перезапустить: TCC применяет их только к новому процессу.
+- Автокапитализация macOS делает заглавной первую букву документа — самопроверка поэтому печатает после префикса «x ».
+- Параллельные задачи в одном дереве: каждая собирает в свой `CARGO_TARGET_DIR`, иначе ждут блокировку cargo.
+
 ## Инициативы и PRD
 
 Крупные изменения здесь ведутся скиллом `/prd`: он пишет PRD и спек-дельты,
