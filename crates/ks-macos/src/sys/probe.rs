@@ -11,9 +11,14 @@ use objc2_app_kit::NSWorkspace;
 
 use super::ffi::*;
 use super::post::CgPoster;
-use crate::exec::Poster;
-use crate::tap::MARK_SELFTEST;
+use ks_core::PhysicalKey;
+use ks_platform::exec::Poster;
 
+use crate::keycode;
+use crate::tap::{MARK_SELFTEST, MacEvent};
+
+/// Буфер обмена: проверка конвертации выделения сохраняет и возвращает буфер пользователя.
+pub use super::clipboard::MacClipboard;
 pub use super::system::{current_layout, on_main, select_layout};
 
 /// Нажатие, которое перехват обрабатывает как нажатие пользователя.
@@ -21,7 +26,28 @@ pub fn user_key(keycode: u16, down: bool, flags: u64) {
     CgPoster {
         mark: MARK_SELFTEST,
     }
-    .key(keycode, down, flags);
+    .replay(&MacEvent {
+        keycode,
+        flags,
+        down,
+    });
+}
+
+/// Жест из модификаторов (⇧, ⌥⇧) целиком, как от клавиатуры пользователя: нажатия по порядку,
+/// отпускания в обратном, между шагами `gap_ms`. `false` — в жесте не модификатор, ничего не
+/// отправлено (зажатым ничего не остаётся).
+pub fn user_modifiers(keys: &[PhysicalKey], gap_ms: u64) -> bool {
+    let Some(steps) = keycode::modifier_steps(keys) else {
+        return false;
+    };
+    let poster = CgPoster {
+        mark: MARK_SELFTEST,
+    };
+    for (code, flags) in steps {
+        poster.flags_changed(code, flags);
+        poster.pause_ms(gap_ms);
+    }
+    true
 }
 
 /// Bundle id и pid приложения в фокусе.
@@ -102,6 +128,17 @@ impl Field {
         }
         let range = unsafe { CFType::wrap_under_create_rule(range) };
         self.set("AXSelectedTextRange", range.as_CFTypeRef())
+    }
+
+    /// Выделяет `len` символов UTF-16 начиная с `start`; `false` — поле не дало себя изменить.
+    pub fn select(&self, start: usize, len: usize) -> bool {
+        let range = CFRange::init(start as isize, len as isize);
+        let value = unsafe { AXValueCreate(4, (&range as *const CFRange).cast()) };
+        if value.is_null() {
+            return false;
+        }
+        let value = unsafe { CFType::wrap_under_create_rule(value) };
+        self.set("AXSelectedTextRange", value.as_CFTypeRef())
     }
 
     fn set(&self, name: &'static str, value: CFTypeRef) -> bool {

@@ -9,6 +9,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
+/// Сколько сервер ждёт строку-команду от клиента.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Поднимает сокет; `Err(AddrInUse)` — на нём уже отвечает другой агент.
 pub fn serve(
     path: &Path,
@@ -30,6 +33,8 @@ pub fn serve(
         .name("ks-ipc".to_owned())
         .spawn(move || {
             for mut stream in listener.incoming().flatten() {
+                // Клиент, не приславший строку, не держит сервер дольше срока.
+                let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                 let mut line = String::new();
                 if BufReader::new(&stream).read_line(&mut line).is_ok() {
                     respond(line.trim(), &mut stream);

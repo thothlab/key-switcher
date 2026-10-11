@@ -149,7 +149,8 @@ pub fn select_layout(mtm: MainThreadMarker, id: &LayoutId) -> bool {
     selected.first().copied().unwrap_or(false) && current_layout(mtm).as_ref() == Some(id)
 }
 
-/// Подписка на смену текущей раскладки; колбэк приходит на главный поток.
+/// Подписка на смену текущей раскладки (`enabled` — на смену набора включённых раскладок);
+/// колбэк приходит на главный поток.
 ///
 /// # Safety
 /// `observer` передаётся в `callback` как есть и должен жить, пока жив процесс.
@@ -157,13 +158,18 @@ pub unsafe fn observe_layout_changes(
     _mtm: MainThreadMarker,
     observer: *const c_void,
     callback: NotificationCallback,
+    enabled: bool,
 ) {
     unsafe {
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDistributedCenter(),
             observer,
             callback,
-            kTISNotifySelectedKeyboardInputSourceChanged,
+            if enabled {
+                kTISNotifyEnabledKeyboardInputSourcesChanged
+            } else {
+                kTISNotifySelectedKeyboardInputSourceChanged
+            },
             ptr::null(),
             4, // CFNotificationSuspensionBehaviorDeliverImmediately
         );

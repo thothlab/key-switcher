@@ -1,5 +1,5 @@
 //! Поток перехвата: активный `CGEventTap` и свой run loop. Колбэк только переводит событие
-//! в `RawEvent` и отдаёт решение `TapLogic`; замены исполняет другой поток.
+//! в `RawEvent` → `InputEvent` и отдаёт решение общей `TapLogic`; замены исполняет другой поток.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -17,7 +17,9 @@ use core_graphics::event::{
 use ks_platform::BackendError;
 
 use super::ffi::{CGEventTapEnable, CGEventTapIsEnabled};
-use crate::tap::{RawEvent, RawKind, TapControl, TapLogic, TapShared, Verdict, clock_ms};
+use ks_platform::intercept::{TapControl, TapLogic, TapShared, Verdict};
+
+use crate::tap::{MacEvent, RawEvent, RawKind, clock_ms, input_event};
 
 /// Порт перехвата; нулевой, пока перехват не поднят.
 #[derive(Clone, Default)]
@@ -64,7 +66,6 @@ fn raw_event(etype: CGEventType, event: &CGEvent) -> RawEvent {
         flags: event.get_flags().bits(),
         autorepeat: field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0,
         user_data: field(EventField::EVENT_SOURCE_USER_DATA),
-        pid: field(EventField::EVENT_TARGET_UNIX_PROCESS_ID) as i32,
         time_ms: clock_ms(),
     }
 }
@@ -76,7 +77,11 @@ const START_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Поднимает перехват на отдельном потоке; ждёт, пока tap создан или отказан. По таймауту
 /// запуск отменяется: поток, создавший tap позже, его не включает и выходит.
-pub fn spawn(logic: TapLogic, shared: Arc<TapShared>, port: TapPort) -> Result<(), BackendError> {
+pub fn spawn(
+    logic: Arc<TapLogic<MacEvent>>,
+    shared: Arc<TapShared<MacEvent>>,
+    port: TapPort,
+) -> Result<(), BackendError> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let gate = Arc::new(AtomicU8::new(GATE_PENDING));
     let thread_gate = gate.clone();
@@ -110,8 +115,8 @@ pub fn spawn(logic: TapLogic, shared: Arc<TapShared>, port: TapPort) -> Result<(
 }
 
 fn run(
-    logic: TapLogic,
-    shared: Arc<TapShared>,
+    logic: Arc<TapLogic<MacEvent>>,
+    shared: Arc<TapShared<MacEvent>>,
     port: TapPort,
     ready: mpsc::Sender<Result<(), BackendError>>,
     gate: &AtomicU8,
@@ -130,7 +135,9 @@ fn run(
         CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::Default,
         mask,
-        move |_proxy, etype, event| match logic.handle(&raw_event(etype, event), &control) {
+        move |_proxy, etype, event| match logic
+            .handle(&input_event(&raw_event(etype, event)), &control)
+        {
             Verdict::Pass => CallbackResult::Keep,
             Verdict::Swallow => CallbackResult::Drop,
         },

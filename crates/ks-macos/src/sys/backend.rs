@@ -1,81 +1,89 @@
-//! `MacBackend`: связывает поток перехвата, исполнителя замен и кэши, которые колбэк читает
-//! без вызовов TIS (текущая раскладка, приложение в фокусе, безопасный ввод, право на ввод).
+//! `MacBackend`: связывает поток перехвата, исполнителя замен (общая модель
+//! `ks_platform::intercept`) и кэши, которые колбэк читает без системных вызовов: текущая
+//! раскладка, приложение в фокусе (уведомление `NSWorkspace` об активации), безопасный ввод,
+//! право на ввод, таблицы раскладок (сбрасываются уведомлением TIS о смене набора).
 
 use std::ffi::c_void;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use block2::RcBlock;
 use core_foundation::dictionary::CFDictionaryRef;
 use core_foundation::string::CFStringRef;
 use dispatch2::DispatchQueue;
-use ks_core::{Action, AppId, Context, LayoutId, LayoutSet};
+use ks_core::{Action, AppId, Context, LayoutId, LayoutSet, ResetReason};
+use ks_platform::exec::{ExecStats, Executor, SWITCH_TIMEOUT_MS, Switcher};
+use ks_platform::intercept::{
+    self, BUSY_TIMEOUT_MS, ContextSource, Job, Pipeline, TapLogic, TapShared,
+};
 use ks_platform::{
     Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
 };
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSWorkspace, NSWorkspaceDidActivateApplicationNotification};
+use objc2_foundation::NSNotification;
 
+use super::clipboard::MacClipboard;
 use super::post::CgPoster;
 use super::system::{self, MainThreadMarker, on_main};
 use super::tap_thread::{self, TapPort};
-use crate::exec::{ExecStats, Executor, Switcher};
-use crate::tap::{
-    BUSY_TIMEOUT_MS, ContextSource, Job, MARK_OWN, Pipeline, TapLogic, TapShared, clock_ms,
-};
-
-/// Сколько исполнитель ждёт переключения раскладки на главном потоке; дольше — замена
-/// уходит запасным путём (Unicode), чтобы стёртое слово было допечатано до срока
-/// `BUSY_TIMEOUT_MS`.
-const SWITCH_TIMEOUT: Duration = Duration::from_millis(500);
+use crate::tap::{MARK_OWN, MacEvent};
 
 /// Как часто перечитывается право на эмуляцию ввода.
 const PERMISSION_POLL: Duration = Duration::from_secs(2);
 
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct State {
-    shared: Arc<TapShared>,
+    shared: Arc<TapShared<MacEvent>>,
     layout: Mutex<LayoutId>,
     secure_input: AtomicBool,
-    app: Mutex<(i32, AppId)>,
+    /// Приложение в фокусе и его имя: из `NSWorkspace`, не из события.
+    app: Mutex<(AppId, String)>,
+    /// Таблицы включённых раскладок; `None` — перестроить при следующем запросе.
+    layouts: Mutex<Option<LayoutSet>>,
+    /// Логика перехвата: через неё сброс по смене фокуса встаёт в очередь удержанного.
+    logic: OnceLock<Arc<TapLogic<MacEvent>>>,
 }
 
 impl State {
-    /// Зовётся с потока перехвата и исполнителя: вызовы ObjC — внутри своего autorelease pool.
-    fn app_for(&self, pid: i32) -> AppId {
-        let mut cached = self.app.lock().unwrap_or_else(|e| e.into_inner());
-        if cached.0 != pid {
-            // NSRunningApplication потокобезопасен (документация AppKit).
-            let id = autoreleasepool(|_| {
-                NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
-                    .and_then(|app| app.bundleIdentifier())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            });
-            *cached = (pid, AppId(id));
-        }
-        cached.1.clone()
+    fn set_layout(&self, id: LayoutId) {
+        *lock(&self.layout) = id;
     }
 
-    fn set_layout(&self, id: LayoutId) {
-        *self.layout.lock().unwrap_or_else(|e| e.into_inner()) = id;
+    /// `true` — сменилось приложение (не только имя).
+    fn set_app(&self, app: (AppId, String)) -> bool {
+        let mut cached = lock(&self.app);
+        let changed = cached.0 != app.0;
+        *cached = app;
+        changed
     }
 }
 
+/// Приложение на переднем плане.
+fn frontmost(_mtm: MainThreadMarker) -> (AppId, String) {
+    autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| {
+                let id = app.bundleIdentifier().map(|s| s.to_string());
+                let name = app.localizedName().map(|s| s.to_string());
+                (AppId(id.unwrap_or_default()), name.unwrap_or_default())
+            })
+            .unwrap_or_default()
+    })
+}
+
 impl ContextSource for State {
-    fn context(&self, pid: i32) -> Context {
+    fn context(&self) -> Context {
         Context {
-            app: if pid == 0 {
-                AppId::default()
-            } else {
-                self.app_for(pid)
-            },
-            layout: self
-                .layout
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            app: lock(&self.app).0.clone(),
+            layout: lock(&self.layout).clone(),
             secure_input: self.secure_input.load(Ordering::Relaxed),
             password_field: false,
         }
@@ -107,14 +115,12 @@ impl Switcher for SysSwitcher {
                     MainThreadMarker::new().is_some_and(|mtm| system::select_layout(mtm, &target));
                 let _ = tx.send(ok);
             });
-            rx.recv_timeout(SWITCH_TIMEOUT).unwrap_or_else(|_| {
-                abandoned.store(true, Ordering::Release);
-                log::warn!(
-                    "главный поток не переключил раскладку за {} мс",
-                    SWITCH_TIMEOUT.as_millis()
-                );
-                false
-            })
+            rx.recv_timeout(Duration::from_millis(SWITCH_TIMEOUT_MS))
+                .unwrap_or_else(|_| {
+                    abandoned.store(true, Ordering::Release);
+                    log::warn!("главный поток не переключил раскладку за {SWITCH_TIMEOUT_MS} мс");
+                    false
+                })
         };
         if ok {
             self.0.set_layout(id.clone());
@@ -123,7 +129,7 @@ impl Switcher for SysSwitcher {
     }
 }
 
-/// Колбэк уведомления о смене раскладки; приходит на главный поток.
+/// Колбэк уведомления о смене текущей раскладки; приходит на главный поток.
 extern "C" fn on_layout_changed(
     _center: *mut c_void,
     observer: *mut c_void,
@@ -131,7 +137,7 @@ extern "C" fn on_layout_changed(
     _object: *const c_void,
     _info: CFDictionaryRef,
 ) {
-    // observer — `Arc<State>`, отпущенный в `start` навсегда.
+    // observer — `Arc<State>`, отпущенный в `start_executor` навсегда.
     let state = unsafe { &*(observer as *const State) };
     if let Some(mtm) = MainThreadMarker::new()
         && let Some(id) = system::current_layout(mtm)
@@ -140,11 +146,50 @@ extern "C" fn on_layout_changed(
     }
 }
 
-/// Что поднято `start`: исполнитель (один на процесс) и признак живого перехвата.
+/// Колбэк уведомления о смене набора включённых раскладок: таблицы перестроятся по запросу.
+extern "C" fn on_enabled_layouts_changed(
+    _center: *mut c_void,
+    observer: *mut c_void,
+    _name: CFStringRef,
+    _object: *const c_void,
+    _info: CFDictionaryRef,
+) {
+    let state = unsafe { &*(observer as *const State) };
+    *lock(&state.layouts) = None;
+}
+
+/// Подписка на активацию приложения (`NSWorkspace`, главный поток). Смена приложения → кэш
+/// контекста и `ResetReason::FocusChanged` через логику перехвата.
+fn observe_focus(_mtm: MainThreadMarker, state: Arc<State>) {
+    let block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if state.set_app(frontmost(mtm)) {
+            log::debug!("приложение в фокусе сменилось");
+            if let Some(logic) = state.logic.get() {
+                logic.reset(ResetReason::FocusChanged);
+            }
+        }
+    });
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    // SAFETY: блок живёт, пока жив наблюдатель; наблюдатель не снимается до конца процесса.
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceDidActivateApplicationNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    std::mem::forget(token);
+}
+
+/// Что поднято `start`: исполнитель и логика перехвата (по одной на процесс).
 #[derive(Default)]
 struct Runtime {
-    jobs: Option<Sender<Job>>,
-    handler: Option<Arc<dyn KeyHandler>>,
+    jobs: Option<Sender<Job<MacEvent>>>,
+    logic: Option<Arc<TapLogic<MacEvent>>>,
     stats: Option<Arc<ExecStats>>,
     tap_up: bool,
 }
@@ -168,7 +213,9 @@ impl MacBackend {
                 shared: Arc::new(TapShared::default()),
                 layout: Mutex::new(LayoutId::default()),
                 secure_input: AtomicBool::new(false),
-                app: Mutex::new((0, AppId::default())),
+                app: Mutex::new((AppId::default(), String::new())),
+                layouts: Mutex::new(None),
+                logic: OnceLock::new(),
             }),
             port: TapPort::default(),
             runtime: Mutex::new(Runtime::default()),
@@ -176,7 +223,7 @@ impl MacBackend {
     }
 
     fn runtime(&self) -> MutexGuard<'_, Runtime> {
-        self.runtime.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.runtime)
     }
 
     fn refresh_caches(&self) {
@@ -188,6 +235,7 @@ impl MacBackend {
             state
                 .secure_input
                 .store(system::secure_input(mtm), Ordering::Relaxed);
+            state.set_app(frontmost(mtm));
         });
         let allowed = system::post_allowed();
         self.state
@@ -196,18 +244,22 @@ impl MacBackend {
             .store(allowed, Ordering::Relaxed);
     }
 
-    /// Один раз на процесс: подписка на смену раскладки, опрос прав, поток исполнителя.
+    /// Один раз на процесс: подписки (раскладки, фокус), опрос прав, исполнитель, логика.
     fn start_executor(
         &self,
         rt: &mut Runtime,
         handler: Arc<dyn KeyHandler>,
     ) -> Result<(), BackendError> {
         let observer = Arc::into_raw(self.state.clone()) as *const c_void as usize;
+        let state = self.state.clone();
         on_main(move |mtm| {
             // SAFETY: observer — `Arc<State>`, намеренно не отпускаемый до конца процесса.
             unsafe {
-                system::observe_layout_changes(mtm, observer as *const c_void, on_layout_changed)
+                let observer = observer as *const c_void;
+                system::observe_layout_changes(mtm, observer, on_layout_changed, false);
+                system::observe_layout_changes(mtm, observer, on_enabled_layouts_changed, true);
             }
+            observe_focus(mtm, state);
         });
         let shared = self.state.shared.clone();
         let _ = std::thread::Builder::new()
@@ -224,28 +276,25 @@ impl MacBackend {
         let exec = Executor::new(
             Arc::new(CgPoster { mark: MARK_OWN }),
             Arc::new(SysSwitcher(self.state.clone())),
-        );
+        )
+        .with_clipboard(Arc::new(MacClipboard));
         rt.stats = Some(exec.stats());
-        let pipeline = Pipeline {
-            handler: handler.clone(),
-            ctx: self.state.clone(),
-            shared: self.state.shared.clone(),
+        let pipeline = Pipeline::new(
+            handler.clone(),
+            self.state.clone(),
+            self.state.shared.clone(),
             exec,
-        };
-        let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
-        std::thread::Builder::new()
-            .name("ks-exec".to_owned())
-            .spawn(move || {
-                for job in jobs_rx {
-                    // Паника в задании не убивает исполнителя; удержание снимает Pipeline.
-                    if catch_unwind(AssertUnwindSafe(|| pipeline.run(job))).is_err() {
-                        log::error!("задание исполнителя завершилось паникой");
-                    }
-                }
-            })
-            .map_err(|e| BackendError::Os(e.to_string()))?;
-        rt.jobs = Some(jobs_tx);
-        rt.handler = Some(handler);
+        );
+        let jobs = intercept::spawn_executor(pipeline)?;
+        let logic = Arc::new(TapLogic::new(
+            handler,
+            self.state.clone(),
+            self.state.shared.clone(),
+            jobs.clone(),
+        ));
+        let _ = self.state.logic.set(logic.clone());
+        rt.jobs = Some(jobs);
+        rt.logic = Some(logic);
         Ok(())
     }
 }
@@ -261,21 +310,19 @@ impl Backend for MacBackend {
             log::info!("перехват уже поднят");
             return Ok(());
         }
-        if rt.jobs.is_none() {
+        if rt.logic.is_none() {
             self.start_executor(&mut rt, handler)?;
         }
-        let (Some(jobs), Some(handler)) = (rt.jobs.clone(), rt.handler.clone()) else {
+        let Some(logic) = rt.logic.clone() else {
             return Err(BackendError::Os("исполнитель не поднят".to_owned()));
         };
-        let logic = TapLogic::new(handler, self.state.clone(), self.state.shared.clone(), jobs);
         tap_thread::spawn(logic, self.state.shared.clone(), self.port.clone())?;
         rt.tap_up = true;
         Ok(())
     }
 
     /// Через ту же очередь исполнителя, что и замены из колбэка, под тем же удержанием.
-    /// С главного потока итог не ждётся (исполнителю нужен главный поток для TIS): задание
-    /// ставится в очередь, ответ — `Ok(())`, ошибка уходит в лог.
+    /// С главного потока итог не ждётся (исполнителю нужен главный поток для TIS).
     fn execute(&self, action: &Action) -> Result<(), BackendError> {
         let Some(jobs) = self.runtime().jobs.clone() else {
             return Err(if system::post_allowed() {
@@ -284,34 +331,18 @@ impl Backend for MacBackend {
                 BackendError::NoPermission
             });
         };
-        let shared = &self.state.shared;
-        let Some(generation) = shared.begin(clock_ms()) else {
-            return Err(BackendError::Os(
-                "исполнитель замены не отвечает".to_owned(),
-            ));
-        };
-        let on_main_thread = MainThreadMarker::new().is_some();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        let job = Job {
-            actions: vec![action.clone()],
-            then_post: None,
-            generation,
-            reply: (!on_main_thread).then_some(reply_tx),
-        };
-        if jobs.send(job).is_err() {
-            shared.abort(generation);
-            return Err(BackendError::Os("исполнитель не запущен".to_owned()));
-        }
-        if on_main_thread {
-            return Ok(());
-        }
-        reply_rx
-            .recv_timeout(Duration::from_millis(2 * BUSY_TIMEOUT_MS))
-            .unwrap_or_else(|_| Err(BackendError::Os("исполнитель не ответил".to_owned())))
+        let wait = MainThreadMarker::new().is_none();
+        intercept::submit(&self.state.shared, &jobs, action, wait)
     }
 
+    /// Из кэша; таблицы строятся заново только после смены набора раскладок в системе.
     fn layouts(&self) -> LayoutSet {
-        on_main(|mtm| system::enabled_layouts(mtm, system::machine_kbd_type(mtm)))
+        if let Some(cached) = lock(&self.state.layouts).clone() {
+            return cached;
+        }
+        let built = on_main(|mtm| system::enabled_layouts(mtm, system::machine_kbd_type(mtm)));
+        *lock(&self.state.layouts) = Some(built.clone());
+        built
     }
 
     fn current_layout(&self) -> LayoutId {
@@ -323,17 +354,15 @@ impl Backend for MacBackend {
         })
     }
 
+    /// Из кэша, который ведёт уведомление об активации; пустой кэш заполняется запросом.
     fn focused_app(&self) -> (AppId, String) {
-        on_main(|_mtm| {
-            NSWorkspace::sharedWorkspace()
-                .frontmostApplication()
-                .map(|app| {
-                    let id = app.bundleIdentifier().map(|s| s.to_string());
-                    let name = app.localizedName().map(|s| s.to_string());
-                    (AppId(id.unwrap_or_default()), name.unwrap_or_default())
-                })
-                .unwrap_or_default()
-        })
+        let cached = lock(&self.state.app).clone();
+        if !cached.0.0.is_empty() {
+            return cached;
+        }
+        let app = on_main(frontmost);
+        self.state.set_app(app.clone());
+        app
     }
 
     fn secure_input(&self) -> bool {

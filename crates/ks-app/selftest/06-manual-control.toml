@@ -1,0 +1,39 @@
+# Сценарии задачи 06 (manual-control/spec.md): отмена ⇧⇧ (история 18), ручная конвертация ⇧⇧
+# (история 20), конвертация выделения ⌥⇧ с возвратом буфера обмена (история 21).
+# "ShiftLeft" — касание Shift отдельными нажатием и отпусканием; "AltLeft+ShiftLeft" — ⌥⇧;
+# "wait:300" — пауза. select — текст после префикса, выделенный перед нажатиями; clipboard —
+# буфер обмена до операции, после неё должен быть он же (буфер пользователя возвращается).
+# Раскладки этой машины: ABC + «Русская» (Apple), не «Русская – ПК»: в ней Shift+Slash — «?»,
+# Shift+Digit7 — «.» (crates/ks-core/tests/fixtures/ru_apple.tsv), поэтому пример спеки
+# «Ghbdtn? rfr ltkf&» даёт «Привет? как дела.», а не «Привет, как дела?».
+
+[[scenario]]
+name = "Отмена исправления двойным Shift"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space", "wait:300", "ShiftLeft", "ShiftLeft"]
+expect_text = "ghbdtn "
+expect_layout = "en"
+
+[[scenario]]
+name = "Ручная конвертация пропущенного слова"
+layout_before = "en"
+input = ["KeyZ", "ShiftLeft", "ShiftLeft"]
+expect_text = "я"
+expect_layout = "ru"
+
+[[scenario]]
+name = "Фраза в выделении"
+layout_before = "en"
+select = "Ghbdtn? rfr ltkf&"
+clipboard = "старое"
+input = ["AltLeft+ShiftLeft"]
+expect_text = "Привет? как дела."
+expect_layout = "en"
+
+[[scenario]]
+name = "Пустое выделение"
+layout_before = "en"
+clipboard = "старое"
+input = ["AltLeft+ShiftLeft"]
+expect_text = ""
+expect_layout = "en"

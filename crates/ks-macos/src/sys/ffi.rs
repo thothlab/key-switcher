@@ -21,6 +21,7 @@ unsafe extern "C" {
     pub static kTISPropertyInputSourceType: CFStringRef;
     pub static kTISTypeKeyboardLayout: CFStringRef;
     pub static kTISNotifySelectedKeyboardInputSourceChanged: CFStringRef;
+    pub static kTISNotifyEnabledKeyboardInputSourcesChanged: CFStringRef;
     pub fn TISCreateInputSourceList(properties: CFDictionaryRef, include_all: u8) -> CFArrayRef;
     pub fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
     pub fn TISGetInputSourceProperty(source: TISInputSourceRef, key: CFStringRef) -> *const c_void;

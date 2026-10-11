@@ -122,7 +122,44 @@ pub fn modifiers(flags: u64) -> Modifiers {
 /// Направление события `FlagsChanged` для клавиши-модификатора: по зависимым от устройства
 /// битам (`NX_DEVICEL*KEYMASK`), чтобы левый и правый Shift различались.
 pub fn modifier_dir(key: PhysicalKey, flags: u64) -> Option<KeyDir> {
-    let bit = match key {
+    let bit = device_bit(key)?;
+    Some(if flags & bit != 0 {
+        KeyDir::Down
+    } else {
+        KeyDir::Up
+    })
+}
+
+/// Жест из одних модификаторов (⇧, ⌥⇧) как цепочка событий `FlagsChanged`: клавиши нажимаются
+/// по порядку и отпускаются в обратном, флаги каждого шага — всё, что зажато после него.
+/// `None` — в списке не модификатор или CapsLock.
+pub fn modifier_steps(keys: &[PhysicalKey]) -> Option<Vec<(u16, u64)>> {
+    let bits = |key: PhysicalKey| -> Option<u64> {
+        let family = match key {
+            K::ShiftLeft | K::ShiftRight => FLAG_SHIFT,
+            K::AltLeft | K::AltRight => FLAG_ALT,
+            K::ControlLeft | K::ControlRight => FLAG_CTRL,
+            K::MetaLeft | K::MetaRight => FLAG_CMD,
+            _ => return None,
+        };
+        Some(family | device_bit(key)?)
+    };
+    let mut held: Vec<(PhysicalKey, u64)> = Vec::with_capacity(keys.len());
+    let flags = |held: &[(PhysicalKey, u64)]| held.iter().fold(0, |acc, (_, b)| acc | b);
+    let mut steps = Vec::with_capacity(keys.len() * 2);
+    for &key in keys {
+        held.push((key, bits(key)?));
+        steps.push((from_physical(key)?, flags(&held)));
+    }
+    while let Some((key, _)) = held.pop() {
+        steps.push((from_physical(key)?, flags(&held)));
+    }
+    Some(steps)
+}
+
+/// Зависимый от устройства бит модификатора (`NX_DEVICEL*KEYMASK`); для CapsLock — его флаг.
+fn device_bit(key: PhysicalKey) -> Option<u64> {
+    Some(match key {
         K::ControlLeft => 0x0001,
         K::ShiftLeft => 0x0002,
         K::ShiftRight => 0x0004,
@@ -133,10 +170,5 @@ pub fn modifier_dir(key: PhysicalKey, flags: u64) -> Option<KeyDir> {
         K::ControlRight => 0x2000,
         K::CapsLock => FLAG_CAPS,
         _ => return None,
-    };
-    Some(if flags & bit != 0 {
-        KeyDir::Down
-    } else {
-        KeyDir::Up
     })
 }

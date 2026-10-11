@@ -2470,6 +2470,7 @@ name = "ks-platform"
 version = "0.1.0"
 dependencies = [
  "ks-core",
+ "log",
  "thiserror 2.0.21",
 ]
 

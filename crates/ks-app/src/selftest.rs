@@ -12,13 +12,32 @@ pub struct Scenario {
     pub name: String,
     /// `"en"` или `"ru"`.
     pub layout_before: String,
-    /// Клавиши W3C; `"Shift+KeyA"` — с Shift.
+    /// Клавиши W3C; `"Shift+KeyA"` — с Shift; `"ShiftLeft"`, `"AltLeft+ShiftLeft"` — жест из
+    /// модификаторов (нажаты по порядку, отпущены в обратном); `"wait:300"` — пауза, мс.
     pub input: Vec<String>,
     pub expect_text: String,
     pub expect_layout: String,
     /// Пауза между нажатиями, мс.
     #[serde(default)]
     pub delay_ms: Option<u64>,
+    /// Текст, который ставится после префикса и выделяется перед нажатиями.
+    #[serde(default)]
+    pub select: Option<String>,
+    /// Содержимое буфера обмена перед нажатиями; после них буфер должен содержать его же.
+    /// Буфер пользователя сохраняется до сценария и возвращается после.
+    #[serde(default)]
+    pub clipboard: Option<String>,
+}
+
+/// Шаг сценария.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stroke {
+    /// Клавиша и нужен ли Shift (флагом, без отдельного нажатия Shift).
+    Key(PhysicalKey, bool),
+    /// Жест из модификаторов: отдельные нажатия и отпускания, как от клавиатуры.
+    Modifiers(Vec<PhysicalKey>),
+    /// Пауза, мс.
+    Wait(u64),
 }
 
 #[derive(Deserialize)]
@@ -27,20 +46,41 @@ struct File {
 }
 
 impl Scenario {
-    /// Нажатия сценария: клавиша и нужен ли Shift.
-    pub fn strokes(&self) -> Result<Vec<(PhysicalKey, bool)>, String> {
-        self.input
-            .iter()
-            .map(|token| {
-                let (shift, name) = match token.strip_prefix("Shift+") {
-                    Some(rest) => (true, rest),
-                    None => (false, token.as_str()),
-                };
-                name.parse::<PhysicalKey>()
-                    .map(|k| (k, shift))
-                    .map_err(|e| format!("{}: {e}", self.name))
-            })
-            .collect()
+    /// Шаги сценария.
+    pub fn strokes(&self) -> Result<Vec<Stroke>, String> {
+        self.input.iter().map(|token| self.stroke(token)).collect()
+    }
+
+    fn stroke(&self, token: &str) -> Result<Stroke, String> {
+        let err = |e: String| format!("{}: {e}", self.name);
+        if let Some(ms) = token.strip_prefix("wait:") {
+            return ms
+                .parse()
+                .map(Stroke::Wait)
+                .map_err(|_| err(format!("пауза «{token}»")));
+        }
+        let parts: Vec<&str> = token.split('+').collect();
+        let last = parts[parts.len() - 1]
+            .parse::<PhysicalKey>()
+            .map_err(|e| err(e.to_string()))?;
+        if last.is_modifier() {
+            let keys = parts
+                .iter()
+                .map(|p| p.parse::<PhysicalKey>().map_err(|e| err(e.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
+            if keys
+                .iter()
+                .any(|k| !k.is_modifier() || *k == PhysicalKey::CapsLock)
+            {
+                return Err(err(format!("в жесте «{token}» не только модификаторы")));
+            }
+            return Ok(Stroke::Modifiers(keys));
+        }
+        match parts.as_slice() {
+            [_] => Ok(Stroke::Key(last, false)),
+            ["Shift", _] => Ok(Stroke::Key(last, true)),
+            _ => Err(err(format!("нажатие «{token}»: ждём Shift+Клавиша"))),
+        }
     }
 }
 
@@ -93,10 +133,12 @@ mod mac {
 
     use ks_core::{Lang, LayoutId, ResetReason};
     use ks_macos::keycode::{self, FLAG_SHIFT};
+    use ks_macos::probe::MacClipboard;
     use ks_macos::probe::{self, Field};
+    use ks_platform::exec::{COPY_TIMEOUT_MS, Clipboard, RESTORE_DELAY_MS};
     use ks_platform::{Backend, KeyHandler};
 
-    use super::{Scenario, mismatch, scenarios};
+    use super::{Scenario, Stroke, mismatch, scenarios};
 
     const TEXTEDIT: &str = "com.apple.TextEdit";
     /// Собственный документ проверки: трогать можно только его.
@@ -105,6 +147,11 @@ mod mac {
     /// Нейтральный префикс перед каждым сценарием: набор идёт не с начала документа, и
     /// автокапитализация macOS первую букву не трогает. Ожидания сценариев — после него.
     const PREFIX: &str = "x ";
+    /// Пауза между шагами жеста из модификаторов: много меньше окна касания Shift.
+    const GESTURE_GAP_MS: u64 = 15;
+    /// Ожидание после жеста со сценарием буфера: срок копирования, пауза перед возвратом буфера
+    /// и запас.
+    const CLIPBOARD_SETTLE_MS: u64 = COPY_TIMEOUT_MS + RESTORE_DELAY_MS + 350;
 
     fn wait_for<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
         let start = Instant::now();
@@ -157,7 +204,23 @@ mod mac {
         }
     }
 
+    /// Буфер обмена пользователя сохраняется до сценария с полем `clipboard` и возвращается
+    /// после при любом исходе.
     fn run_one(
+        s: &Scenario,
+        handler: &dyn KeyHandler,
+        layout_for: &dyn Fn(&str) -> Option<LayoutId>,
+        lang_of: &dyn Fn(&LayoutId) -> &'static str,
+    ) -> Result<(), String> {
+        let saved = s.clipboard.as_ref().map(|_| MacClipboard.snapshot());
+        let result = run_steps(s, handler, layout_for, lang_of);
+        if let Some(saved) = saved {
+            MacClipboard.restore(&saved);
+        }
+        result
+    }
+
+    fn run_steps(
         s: &Scenario,
         handler: &dyn KeyHandler,
         layout_for: &dyn Fn(&str) -> Option<LayoutId>,
@@ -168,19 +231,46 @@ mod mac {
         if !probe::on_main(move |mtm| probe::select_layout(mtm, &id)) {
             return Err("не удалось включить раскладку layout_before".to_owned());
         }
-        if !field()?.set_text(PREFIX) {
+        let selected = s.select.as_deref().unwrap_or("");
+        let field_now = field()?;
+        if !field_now.set_text(&format!("{PREFIX}{selected}")) {
             return Err("поле документа проверки не меняется через AXValue".to_owned());
+        }
+        if !selected.is_empty()
+            && !field_now.select(
+                PREFIX.encode_utf16().count(),
+                selected.encode_utf16().count(),
+            )
+        {
+            return Err("поле документа проверки не даёт выделить текст".to_owned());
         }
         std::thread::sleep(Duration::from_millis(300));
         handler.on_reset(ResetReason::External);
         field()?;
+        if let Some(clip) = &s.clipboard {
+            MacClipboard.set_text(clip);
+        }
         let delay = Duration::from_millis(s.delay_ms.unwrap_or(DEFAULT_DELAY_MS));
-        for (key, shift) in s.strokes()? {
-            let code = keycode::from_physical(key).ok_or(format!("нет кода для {key}"))?;
-            let flags = if shift { FLAG_SHIFT } else { 0 };
-            probe::user_key(code, true, flags);
-            probe::user_key(code, false, flags);
+        for stroke in s.strokes()? {
+            match stroke {
+                Stroke::Key(key, shift) => {
+                    let code = keycode::from_physical(key).ok_or(format!("нет кода для {key}"))?;
+                    let flags = if shift { FLAG_SHIFT } else { 0 };
+                    probe::user_key(code, true, flags);
+                    probe::user_key(code, false, flags);
+                }
+                Stroke::Modifiers(keys) => {
+                    if !probe::user_modifiers(&keys, GESTURE_GAP_MS) {
+                        return Err("жест из модификаторов не отправлен".to_owned());
+                    }
+                }
+                Stroke::Wait(ms) => std::thread::sleep(Duration::from_millis(ms)),
+            }
             std::thread::sleep(delay);
+        }
+        if s.clipboard.is_some() {
+            // Копирование, вставка и возврат буфера идут на исполнителе после жеста.
+            std::thread::sleep(Duration::from_millis(CLIPBOARD_SETTLE_MS));
         }
         let expected = format!("{PREFIX}{}", s.expect_text);
         let mut text = String::new();
@@ -197,6 +287,15 @@ mod mac {
         let mut errors: Vec<String> = mismatch(&expected, &text).into_iter().collect();
         if lang != s.expect_layout {
             errors.push(format!("раскладка {lang}, ожидалась {}", s.expect_layout));
+        }
+        if let Some(clip) = &s.clipboard {
+            let kept = wait_for(Duration::from_secs(2), || {
+                (MacClipboard.text().as_deref() == Some(clip.as_str())).then_some(())
+            });
+            if kept.is_none() {
+                // Содержимое буфера не печатается: там может быть что угодно.
+                errors.push("буфер обмена после операции не тот, что был до неё".to_owned());
+            }
         }
         if errors.is_empty() {
             Ok(())

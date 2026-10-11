@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use ks_core::EngineStatus;
-use ks_platform::{Backend, PermissionKind, PermissionStatus, TrayStatus};
+use ks_platform::{Backend, PermissionKind, PermissionStatus, TrayCommand, TrayModel, TrayStatus};
 
 pub fn tray_status(
     permissions: &[PermissionStatus],
@@ -34,6 +34,69 @@ pub fn tooltip(status: TrayStatus) -> String {
         TrayStatus::ConfigError => "ошибка в файле настроек",
     };
     format!("KeySwitcher — {state}")
+}
+
+/// Строка меню трея: текст, команда (`None` — неактивная строка), отметка-флажок.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuEntry {
+    Item {
+        label: String,
+        command: Option<TrayCommand>,
+        checked: Option<bool>,
+    },
+    Separator,
+}
+
+fn item(label: String, command: Option<TrayCommand>, checked: Option<bool>) -> MenuEntry {
+    MenuEntry::Item {
+        label,
+        command,
+        checked,
+    }
+}
+
+/// Меню трея по модели (PRD история 26): состояние, ошибка настроек, «Автоисправление»,
+/// «Не исправлять в …»/«Исправлять в …», «Не исправлять „…“» (только после отмены),
+/// «Настройки…», «Выход».
+pub fn menu_entries(model: &TrayModel) -> Vec<MenuEntry> {
+    let mut menu = vec![item(tooltip(model.status), None, None)];
+    if let Some(e) = &model.config_error {
+        menu.push(item(format!("Ошибка в настройках: {e}"), None, None));
+        menu.push(item(
+            "Работаю на значениях по умолчанию, файл не изменён".to_owned(),
+            None,
+            None,
+        ));
+    }
+    menu.push(MenuEntry::Separator);
+    menu.push(item(
+        "Автоисправление".to_owned(),
+        Some(TrayCommand::ToggleAutocorrect),
+        Some(model.autocorrect),
+    ));
+    if let Some((app, name, excluded)) = &model.focused_app {
+        let label = if *excluded {
+            format!("Исправлять в {name}")
+        } else {
+            format!("Не исправлять в {name}")
+        };
+        menu.push(item(label, Some(TrayCommand::ToggleApp(app.clone())), None));
+    }
+    if let Some(word) = &model.undone_word {
+        menu.push(item(
+            format!("Не исправлять „{word}“"),
+            Some(TrayCommand::NeverWord(word.clone())),
+            None,
+        ));
+    }
+    menu.push(MenuEntry::Separator);
+    menu.push(item(
+        "Настройки…".to_owned(),
+        Some(TrayCommand::OpenSettings),
+        None,
+    ));
+    menu.push(item("Выход".to_owned(), Some(TrayCommand::Quit), None));
+    menu
 }
 
 fn permission_name(kind: PermissionKind) -> &'static str {
@@ -96,6 +159,10 @@ pub fn report(backend: &dyn Backend, engine: Option<&EngineStatus>, source: Sour
             "нет"
         }
     );
+    let (app, name) = backend.focused_app();
+    if !app.0.is_empty() {
+        let _ = writeln!(out, "приложение в фокусе: {name} ({})", app.0);
+    }
     out += "раскладки:\n";
     for name in &health.layouts {
         let _ = writeln!(out, "  {name}");

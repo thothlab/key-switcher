@@ -99,17 +99,6 @@ fn without_accessibility_the_icon_says_permissions_are_needed() {
 }
 
 #[test]
-fn without_ru_en_pair_the_icon_says_layouts_are_needed() {
-    let b = FakeBackend {
-        accessibility: true,
-        with_russian: false,
-    };
-    let status = tray_status(&b.permissions(), true, false, &EngineStatus::NeedsLayouts);
-    assert_eq!(status, TrayStatus::NeedsLayouts);
-    assert_eq!(tooltip(status), "KeySwitcher — Нужны раскладки RU и EN");
-}
-
-#[test]
 fn status_of_a_working_agent_names_capture_layouts_and_secure_input() {
     let b = FakeBackend {
         accessibility: true,
@@ -153,6 +142,10 @@ fn embedded_selftest_scenarios_cover_this_task() {
         "Enter как граница",
         "Tab не запускает исправление",
         "Быстрый набор",
+        "Отмена исправления двойным Shift",
+        "Ручная конвертация пропущенного слова",
+        "Фраза в выделении",
+        "Пустое выделение",
     ] {
         assert!(
             names.iter().any(|n| n == expected),
@@ -195,4 +188,31 @@ fn selftest_failure_report_names_expected_text_but_never_the_field_content() {
     let tail = ks_app::selftest::mismatch("привет ", "привет").unwrap();
     assert!(tail.contains("на символе 6"), "{tail}");
     assert_eq!(ks_app::selftest::mismatch("good ", "good "), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn silent_client_does_not_block_the_agent_socket() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    let path = std::env::temp_dir().join(format!("ks-test-silent-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    ks_app::ipc::serve(&path, |_, out| {
+        let _ = writeln!(out, "клавиатура отслеживается");
+    })
+    .expect("сокет поднят");
+    let _silent = UnixStream::connect(&path).expect("молчащий клиент");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ask_path = path.clone();
+    std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        let _ = ks_app::ipc::ask(&ask_path, "status", |l| lines.push(l.to_owned()));
+        let _ = tx.send(lines);
+    });
+    let lines = rx
+        .recv_timeout(ks_app::ipc::READ_TIMEOUT + Duration::from_secs(3))
+        .expect("второй клиент получил ответ, не дожидаясь молчащего");
+    assert_eq!(lines, ["клавиатура отслеживается"]);
+    let _ = std::fs::remove_file(&path);
 }

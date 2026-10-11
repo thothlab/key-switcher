@@ -3,6 +3,7 @@
 #![allow(unsafe_code)] // всё FFI бэкенда живёт здесь; модули логики остаются без unsafe
 
 mod backend;
+mod clipboard;
 mod ffi;
 mod post;
 pub mod probe;
