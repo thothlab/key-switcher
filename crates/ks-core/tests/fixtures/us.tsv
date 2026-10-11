@@ -1,0 +1,54 @@
+# KeySwitcher: фикстура раскладки, снята scripts/macos/dump-layouts.swift
+# источник: UCKeyTranslate, kbdType=40 (ANSI), LMGetKbdType машины=43, macOS Version 27.0.1 (Build 26A434)
+# колонки: код W3C, Base, Shift, Caps, Shift+Caps; пусто — символа нет
+@id	com.apple.keylayout.US
+@lang	en
+@name	com.apple.keylayout.US
+KeyA	a	A	A	A
+KeyS	s	S	S	S
+KeyD	d	D	D	D
+KeyF	f	F	F	F
+KeyH	h	H	H	H
+KeyG	g	G	G	G
+KeyZ	z	Z	Z	Z
+KeyX	x	X	X	X
+KeyC	c	C	C	C
+KeyV	v	V	V	V
+IntlBackslash	§	±	§	±
+KeyB	b	B	B	B
+KeyQ	q	Q	Q	Q
+KeyW	w	W	W	W
+KeyE	e	E	E	E
+KeyR	r	R	R	R
+KeyY	y	Y	Y	Y
+KeyT	t	T	T	T
+Digit1	1	!	1	!
+Digit2	2	@	2	@
+Digit3	3	#	3	#
+Digit4	4	$	4	$
+Digit6	6	^	6	^
+Digit5	5	%	5	%
+Equal	=	+	=	+
+Digit9	9	(	9	(
+Digit7	7	&	7	&
+Minus	-	_	-	_
+Digit8	8	*	8	*
+Digit0	0	)	0	)
+BracketRight	]	}	]	}
+KeyO	o	O	O	O
+KeyU	u	U	U	U
+BracketLeft	[	{	[	{
+KeyI	i	I	I	I
+KeyP	p	P	P	P
+KeyL	l	L	L	L
+KeyJ	j	J	J	J
+Quote	'	"	'	"
+KeyK	k	K	K	K
+Semicolon	;	:	;	:
+Backslash	\	|	\	|
+Comma	,	<	,	<
+Slash	/	?	/	?
+KeyN	n	N	N	N
+KeyM	m	M	M	M
+Period	.	>	.	>
+Backquote	`	~	`	~

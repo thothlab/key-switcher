@@ -1,0 +1,17 @@
+[package]
+name = "ks-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ks-core.workspace = true
+ks-platform.workspace = true
+log.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[lints]
+workspace = true

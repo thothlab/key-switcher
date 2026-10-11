@@ -1,0 +1,38 @@
+[package]
+name = "ks-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "keyswitcher"
+path = "src/main.rs"
+
+[dependencies]
+ks-core.workspace = true
+ks-data.workspace = true
+ks-platform.workspace = true
+ks-settings.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+notify.workspace = true
+directories.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ks-macos.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ks-windows.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ks-linux.workspace = true
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+tray-icon.workspace = true
+muda.workspace = true
+tao.workspace = true
+
+[lints]
+workspace = true

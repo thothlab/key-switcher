@@ -1,0 +1,18 @@
+[package]
+name = "ks-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ks-eval"
+path = "src/main.rs"
+
+[dependencies]
+ks-core.workspace = true
+ks-data.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

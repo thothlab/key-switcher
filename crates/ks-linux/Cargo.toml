@@ -1,0 +1,21 @@
+[package]
+name = "ks-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ks-core.workspace = true
+ks-platform.workspace = true
+log.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev.workspace = true
+x11rb.workspace = true
+zbus.workspace = true
+ksni.workspace = true
+xkbcommon-dl.workspace = true
+
+[lints]
+workspace = true
