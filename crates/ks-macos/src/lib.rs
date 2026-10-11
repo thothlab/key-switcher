@@ -1,70 +1,19 @@
-//! Бэкенд macOS — заготовка. Перехват, эмуляцию ввода и таблицы раскладок из API ОС
-//! добавляет задача этого бэкенда; до тех пор всё, что зовётся при старте, возвращает `Err`.
+//! Бэкенд macOS: активный `CGEventTap` на своём потоке, исполнение замен синтетическими
+//! событиями, таблицы раскладок из `UCKeyTranslate`, права TCC. Логика колбэка и исполнителя
+//! вынесена в модули без системных вызовов (`tap`, `exec`, `keycode`, `layouts`) и проверяется
+//! тестами на любой ОС; системная часть — `sys` (только macOS).
 
-use std::sync::Arc;
+pub mod exec;
+pub mod keycode;
+pub mod layouts;
+pub mod tap;
 
-use ks_core::{Action, AppId, LayoutId, LayoutSet};
-use ks_platform::{
-    Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
-};
+#[cfg(target_os = "macos")]
+mod sys;
+#[cfg(target_os = "macos")]
+pub use sys::{MacBackend, probe, system};
 
-const NOT_YET: &str = "бэкенд macOS ещё не реализован";
-
-#[derive(Debug, Default)]
-pub struct MacBackend;
-
-impl MacBackend {
-    pub fn new() -> MacBackend {
-        MacBackend
-    }
-}
-
-impl Backend for MacBackend {
-    fn start(&self, _handler: Arc<dyn KeyHandler>) -> Result<(), BackendError> {
-        log::warn!("{NOT_YET}");
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn execute(&self, _action: &Action) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn layouts(&self) -> LayoutSet {
-        LayoutSet::default()
-    }
-
-    fn current_layout(&self) -> LayoutId {
-        LayoutId::default()
-    }
-
-    fn focused_app(&self) -> (AppId, String) {
-        (AppId::default(), String::new())
-    }
-
-    fn secure_input(&self) -> bool {
-        false
-    }
-
-    fn permissions(&self) -> Vec<PermissionStatus> {
-        Vec::new()
-    }
-
-    fn request_permission(&self, _kind: PermissionKind) {}
-
-    fn open_permission_settings(&self, _kind: PermissionKind) {}
-
-    fn set_autostart(&self, _on: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn autostart(&self) -> bool {
-        false
-    }
-
-    fn health(&self) -> BackendHealth {
-        BackendHealth {
-            detail: NOT_YET.to_owned(),
-            ..BackendHealth::default()
-        }
-    }
-}
+#[cfg(not(target_os = "macos"))]
+mod stub;
+#[cfg(not(target_os = "macos"))]
+pub use stub::MacBackend;

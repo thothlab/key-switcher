@@ -1,0 +1,38 @@
+# Сценарии задачи 02 (autocorrect/spec.md). input — физические клавиши W3C, "Shift+KeyA" — с Shift.
+# layout_before / expect_layout: "en" | "ru". delay_ms — пауза между нажатиями (по умолчанию 40).
+
+[[scenario]]
+name = "Русское слово в английской раскладке"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space"]
+expect_text = "привет "
+expect_layout = "ru"
+
+[[scenario]]
+name = "Английская фраза в русской раскладке"
+layout_before = "ru"
+input = ["KeyG", "KeyO", "KeyO", "KeyD", "Space", "KeyM", "KeyO", "KeyR", "KeyN", "KeyI", "KeyN", "KeyG", "Space"]
+expect_text = "good morning "
+expect_layout = "en"
+
+[[scenario]]
+name = "Enter как граница"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Enter"]
+expect_text = "привет\n"
+expect_layout = "ru"
+
+[[scenario]]
+name = "Tab не запускает исправление"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Tab"]
+expect_text = "ghbdtn\t"
+expect_layout = "en"
+
+[[scenario]]
+name = "Быстрый набор"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space", "KeyC", "KeyK", "KeyJ", "KeyD", "KeyJ", "Space"]
+expect_text = "привет слово "
+expect_layout = "ru"
+delay_ms = 0

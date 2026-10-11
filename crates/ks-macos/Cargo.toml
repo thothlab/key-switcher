@@ -10,6 +10,9 @@ ks-core.workspace = true
 ks-platform.workspace = true
 log.workspace = true
 
+[dev-dependencies]
+ks-core.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-foundation.workspace = true
@@ -21,3 +24,7 @@ core-graphics.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "system_layouts"
+harness = false
