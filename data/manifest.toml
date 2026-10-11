@@ -1,0 +1,46 @@
+# Сгенерировано ks-datagen; не править руками.
+
+[hunspell]
+source = "https://github.com/LibreOffice/dictionaries"
+commit = "32b006a2c22a4ac7e8ed3f03346f7b3d85a970a4"
+
+[ru]
+dic_entries = 146269
+raw_forms = 1491586
+forms = 1366410
+fst_bytes = 1292170
+fst_gz_bytes = 708049
+lm_order = 3
+lm_smoothing = "Witten-Bell interpolated, unigram add-one"
+lm_train = "только словоформы ru_RU — те же, что в words_ru.fst.gz"
+lm_bytes = 42950
+lm_gz_bytes = 30952
+held_out_eval_words = 18161
+held_out_outside_hunspell = 676
+held_out_leaks = 0
+
+[en]
+dic_entries = 49568
+raw_forms = 129490
+forms = 121252
+fst_bytes = 332804
+fst_gz_bytes = 232044
+lm_order = 3
+lm_smoothing = "Witten-Bell interpolated, unigram add-one"
+lm_train = "только словоформы en_US — те же, что в words_en.fst.gz"
+lm_bytes = 27038
+lm_gz_bytes = 19896
+held_out_eval_words = 10241
+held_out_outside_hunspell = 655
+held_out_leaks = 0
+
+[eval]
+source = "https://downloads.tatoeba.org/exports/per_language"
+license = "CC BY 2.0 FR"
+held_out = "проверяется генератором: слова корпуса вне развёртки hunspell не попадают ни во fst, ни в обучение LM"
+rus_export = "Sat, 10 Oct 2026 06:30:50 GMT"
+rus_sentences = 19004
+rus_share_per_10000 = 160
+eng_export = "Sat, 10 Oct 2026 06:30:50 GMT"
+eng_sentences = 17894
+eng_share_per_10000 = 90
