@@ -1,0 +1,47 @@
+# Сценарии задачи 05 (autocorrect/spec.md): регистр, клавиши-знаки, короткие слова, коллизии,
+# две заглавные. Раскладки этой машины: ABC + «Русская» (Apple) — запятая на Shift+Digit6.
+# input — физические клавиши W3C, "Shift+KeyA" — с Shift. layout_before / expect_layout: "en" | "ru".
+
+[[scenario]]
+name = "Заглавная первая буква"
+layout_before = "en"
+input = ["Shift+KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space"]
+expect_text = "Привет "
+expect_layout = "ru"
+
+[[scenario]]
+name = "Хвостовая пунктуация в раскладке «Русская» (Apple)"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Shift+Digit6", "Space"]
+expect_text = "привет, "
+expect_layout = "ru"
+
+[[scenario]]
+name = "Буква на клавише-знаке"
+layout_before = "en"
+input = ["KeyC", "KeyG", "KeyF", "KeyC", "KeyB", "Comma", "KeyJ", "Space"]
+expect_text = "спасибо "
+expect_layout = "ru"
+
+[[scenario]]
+# Раскладка переключается после «привет», и KeyZ сразу печатает «я»: правило одной буквы
+# здесь не участвует (оно покрыто тестом ядра detect_rules.rs).
+name = "Фраза пословно: после исправления раскладка переключена"
+layout_before = "en"
+input = ["KeyG", "KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space", "KeyZ", "Space", "KeyL", "KeyJ", "KeyV", "KeyF", "Space"]
+expect_text = "привет я дома "
+expect_layout = "ru"
+
+[[scenario]]
+name = "Коллизия here ↔ руку"
+layout_before = "en"
+input = ["KeyH", "KeyE", "KeyR", "KeyE", "Space"]
+expect_text = "here "
+expect_layout = "en"
+
+[[scenario]]
+name = "ПРивет"
+layout_before = "ru"
+input = ["Shift+KeyG", "Shift+KeyH", "KeyB", "KeyD", "KeyT", "KeyN", "Space"]
+expect_text = "Привет "
+expect_layout = "ru"

@@ -5,7 +5,7 @@ use ks_core::{Config, LayoutMap, Lexicon, Os};
 use ks_eval::metrics::{Counts, RecallOutcome, Tally};
 use ks_eval::{
     EngineSubject, Layouts, Part, RecallWord, Subject, Variant, Word, load_corpus, mistype,
-    run_live, run_recall, smoke_check, type_correct,
+    run_flow, run_live, run_recall, smoke_check, type_correct,
 };
 
 fn screen(intended: &str, from: &LayoutMap, typed: &LayoutMap, caps: bool) -> String {
@@ -172,4 +172,27 @@ fn headline_skips_slices_without_dictionary_words() {
         Some(&Counts { n: 1, hit: 1 })
     );
     assert_eq!(tally.adversarial_rows().count(), 1);
+}
+
+#[test]
+fn flow_switches_layout_after_the_first_fix_and_counts_one_letter_words() {
+    let l = Layouts::fixtures();
+    let lex = Lexicon::embedded();
+    let mut engine = EngineSubject::new(lex, vec![l.us.clone(), l.ru_pc.clone()]);
+    let sentences = ["привет я дома".to_owned(), "я дома".to_owned()];
+    let mut tally = Tally::default();
+    run_flow(
+        &mut engine,
+        &sentences,
+        &l.ru_pc,
+        &l.us,
+        "поток",
+        &mut tally,
+    );
+    let row = tally.flow_row("поток").expect("срез потока");
+    // 1: «ghbdtn» → «привет», дальше набрано в RU — верно; 2: «z» без контекста остаётся
+    assert_eq!(row.phrases, Counts { n: 2, hit: 1 });
+    assert_eq!(row.one_letter, Counts { n: 2, hit: 1 });
+    assert_eq!(row.one_letter_wrong_layout, Counts { n: 1, hit: 0 });
+    assert_eq!(row.skipped, 0);
 }

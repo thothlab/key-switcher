@@ -9,7 +9,7 @@
 //! Часов в ядре нет: время — только `KeyEvent.time_ms` и `Engine::tick(now_ms)`.
 
 use crate::buffer::TokenBuffer;
-use crate::engine::convert_keys;
+use crate::detect::convert_keys;
 use crate::{
     Action, AppId, Config, Context, Disposition, Hotkey, KeyDir, KeyEvent, KeyStroke, Lang,
     LayoutId, LayoutMap, LayoutSet, Level, Modifiers, PhysicalKey, ReplaceKind, ResetReason,
@@ -529,7 +529,7 @@ impl WordRules {
 
     /// Набранный токен есть в списке: без учёта регистра, хвостовые знаки можно не писать.
     pub fn contains(&self, typed: &str) -> bool {
-        let core = typed.trim_end_matches(|c: char| !c.is_alphanumeric());
+        let core = typed.trim_end_matches(|c: char| !ks_data::is_word_char(c));
         self.never
             .iter()
             .map(|w| w.trim())

@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use crate::buffer::TokenBuffer;
+use crate::detect::{self, Decision, Segment};
 use crate::input::{InputState, View};
 use crate::{
     Action, Config, Context, Disposition, EngineStatus, KeyDir, KeyEvent, KeyStroke, Lang,
     LayoutId, LayoutMap, LayoutSet, Level, Lexicon, Modifiers, Outcome, PhysicalKey, ReplaceKind,
-    ResetReason, detect,
+    ResetReason,
 };
 
 /// Движок: нажатия и контекст на вход, действия на выход. Как действия исполняются, не знает.
@@ -17,13 +18,8 @@ pub struct Engine {
     layouts: LayoutSet,
     buffer: TokenBuffer,
     input: InputState,
-}
-
-/// Слово, прочитанное в двух раскладках.
-pub(crate) struct Converted {
-    pub(crate) typed: String,
-    pub(crate) converted: String,
-    pub(crate) strokes: Vec<KeyStroke>,
+    /// Язык последних решённых слов: переживает границу, умирает при сбросе буфера.
+    segment: Segment,
 }
 
 impl Engine {
@@ -34,6 +30,7 @@ impl Engine {
             layouts,
             buffer: TokenBuffer::default(),
             input: InputState::default(),
+            segment: Segment::default(),
         }
     }
 
@@ -41,7 +38,9 @@ impl Engine {
     /// Действия ручного управления (жесты, хоткеи) стоят в `actions` первыми; при
     /// `Disposition::Pass` бэкенд исполняет их до того, как пропустить само нажатие.
     pub fn on_key(&mut self, ev: &KeyEvent, ctx: &Context) -> Outcome {
-        self.buffer.note_app(&ctx.app);
+        if self.buffer.note_app(&ctx.app) {
+            self.segment.reset();
+        }
         let view = View {
             config: &self.config,
             layouts: &self.layouts,
@@ -50,6 +49,18 @@ impl Engine {
         let step = self.input.on_key(ev, ctx, &view);
         if let Some(layout) = step.relayout {
             self.buffer.relayout(layout);
+        }
+        // отмена и ручная конвертация говорят, на каком языке слово на самом деле
+        for action in &step.actions {
+            if let Action::Replace {
+                kind: ReplaceKind::Undo | ReplaceKind::Manual,
+                target_layout: Some(id),
+                ..
+            } = action
+                && let Some(map) = self.layouts.get(id)
+            {
+                self.segment.set(map.lang);
+            }
         }
         if let Some(disposition) = step.consumed {
             return Outcome {
@@ -81,18 +92,18 @@ impl Engine {
     }
 
     pub fn on_reset(&mut self, why: ResetReason) {
-        self.buffer.clear();
+        self.forget();
         self.input.on_reset(why);
     }
 
     pub fn set_config(&mut self, config: Config) {
         self.config = config;
-        self.buffer.clear();
+        self.forget();
     }
 
     pub fn set_layouts(&mut self, layouts: LayoutSet) {
         self.layouts = layouts;
-        self.buffer.clear();
+        self.forget();
         self.input.forget_word();
     }
 
@@ -147,12 +158,12 @@ impl Engine {
             return Outcome::pass();
         }
         if ctx.secure_input || ctx.password_field || ev.mods.ctrl || ev.mods.meta || ev.mods.alt {
-            self.buffer.clear();
+            self.forget();
             return Outcome::pass();
         }
         match ev.key {
             PhysicalKey::Space | PhysicalKey::Enter => {
-                let outcome = self.decide(ev.key, ev.mods);
+                let outcome = self.decide(ev.key, ev.mods, ctx);
                 self.input
                     .word_done(&self.buffer, ev, &ctx.app, &outcome.actions);
                 self.buffer.clear();
@@ -176,19 +187,32 @@ impl Engine {
                 if known {
                     self.buffer.push(key, level, layout);
                 } else {
-                    self.buffer.clear();
+                    self.buffer.interrupt();
                 }
                 Outcome::pass()
             }
+            // клавиша без символа: каретка на месте, остаток слова — неполный
+            PhysicalKey::Other(_) | PhysicalKey::Pause => {
+                self.buffer.interrupt();
+                Outcome::pass()
+            }
+            // Tab, Escape, стрелки, Home/End, PageUp/PageDown: слово и контекст забыты
             _ => {
-                self.buffer.clear();
+                self.forget();
                 Outcome::pass()
             }
         }
     }
 
-    fn decide(&self, boundary: PhysicalKey, mods: Modifiers) -> Outcome {
-        if !self.config.autocorrect || self.buffer.is_empty() || self.buffer.is_edited() {
+    /// Сброс без решения: слово и контекст сегмента забыты.
+    fn forget(&mut self) {
+        self.buffer.clear();
+        self.segment.reset();
+    }
+
+    /// Решение на границе слова (`detect`); исправление — `Replace` с проглоченной границей.
+    fn decide(&mut self, boundary: PhysicalKey, mods: Modifiers, ctx: &Context) -> Outcome {
+        if !self.config.autocorrect || self.buffer.is_empty() {
             return Outcome::pass();
         }
         let Some((en, ru)) = self.layouts.pair() else {
@@ -202,28 +226,26 @@ impl Engine {
             Lang::Ru => en,
             Lang::Other => return Outcome::pass(),
         };
-        let Some(word) = convert_keys(self.buffer.keys(), from, to) else {
+        let decision = detect::decide(&detect::Input {
+            keys: self.buffer.keys(),
+            from,
+            to,
+            ctx,
+            config: &self.config,
+            lexicon: &self.lexicon,
+            segment: self.segment.lang(),
+            edited: self.buffer.is_edited(),
+        });
+        self.segment.note(&decision);
+        let Decision::Fix(fix) = decision else {
             return Outcome::pass();
         };
-        if self.config.words.contains(&word.typed) {
-            return Outcome::pass();
-        }
-        if !detect::should_convert(
-            &word.typed,
-            from.lang,
-            &word.converted,
-            to.lang,
-            &self.lexicon,
-        ) {
-            return Outcome::pass();
-        }
-        let erase = word.strokes.len();
-        let mut keys = word.strokes;
+        let mut keys = fix.strokes;
         keys.push(KeyStroke {
             key: boundary,
             shift: mods.shift,
         });
-        let mut text = word.converted;
+        let mut text = fix.text;
         text.push(if boundary == PhysicalKey::Enter {
             '\n'
         } else {
@@ -232,35 +254,12 @@ impl Engine {
         Outcome {
             disposition: Disposition::Swallow,
             actions: vec![Action::Replace {
-                erase,
+                erase: self.buffer.keys().len(),
                 keys,
                 text,
-                target_layout: Some(to.id.clone()),
-                kind: ReplaceKind::Auto,
+                target_layout: fix.target,
+                kind: fix.kind,
             }],
         }
     }
-}
-
-/// Читает нажатия слова в раскладке `from` и в раскладке `to` на тех же уровнях;
-/// `None`, если у какой-то клавиши нет символа в одной из раскладок.
-pub(crate) fn convert_keys(
-    keys: &[(PhysicalKey, Level)],
-    from: &LayoutMap,
-    to: &LayoutMap,
-) -> Option<Converted> {
-    let mut word = Converted {
-        typed: String::with_capacity(keys.len() * 2),
-        converted: String::with_capacity(keys.len() * 2),
-        strokes: Vec::with_capacity(keys.len() + 1),
-    };
-    for &(key, level) in keys {
-        word.typed.push(from.char_for(key, level)?);
-        word.converted.push(to.char_for(key, level)?);
-        word.strokes.push(KeyStroke {
-            key,
-            shift: level.is_shift(),
-        });
-    }
-    Some(word)
 }

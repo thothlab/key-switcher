@@ -617,6 +617,67 @@ pub fn run_recall(
     }
 }
 
+/// Поток фразы: предложение набирается целиком нажатиями задуманного текста при активной
+/// раскладке `wrong`, пока движок не исправит слово; исправление переключает раскладку
+/// (буквы замены — из `intended`), и дальше слова набираются верно. Фраза верна, если каждое
+/// слово на экране совпало с задуманным. Фразы, которые не набрать, считаются отдельно.
+pub fn run_flow(
+    subject: &mut impl Subject,
+    sentences: &[String],
+    intended: &LayoutMap,
+    wrong: &LayoutMap,
+    slice: &str,
+    tally: &mut Tally,
+) {
+    let letters_of = |map: &LayoutMap, text: &str| {
+        letters(text) > 0
+            && text
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .all(|c| map.stroke_for(c).is_some())
+    };
+    for sentence in sentences {
+        let tokens: Vec<String> = normalize_typography(sentence)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        let typable = tokens
+            .iter()
+            .all(|t| mistype(t, intended, wrong, false).is_some());
+        if tokens.is_empty() || !typable {
+            tally.flow_skip(slice);
+            continue;
+        }
+        subject.reset();
+        let (mut in_wrong, mut phrase_ok, mut singles) = (true, true, Vec::new());
+        for token in &tokens {
+            let typed_wrong = in_wrong;
+            let word = match in_wrong {
+                true => mistype(token, intended, wrong, false),
+                false => Some(type_correct(token, intended)),
+            };
+            let Some(word) = word else { continue };
+            let screen = match subject.type_word(&word) {
+                Some(fixed) => {
+                    if letters_of(intended, &fixed) && !letters_of(wrong, &fixed) {
+                        in_wrong = false;
+                    } else if letters_of(wrong, &fixed) && !letters_of(intended, &fixed) {
+                        in_wrong = true;
+                    }
+                    fixed
+                }
+                None => word.screen,
+            };
+            let ok = screen == *token;
+            phrase_ok &= ok;
+            if letters(token) == 1 {
+                singles.push((typed_wrong, ok));
+            }
+        }
+        tally.flow(slice, phrase_ok, &singles);
+    }
+}
+
 /// Состязательный срез: каждый токен набран правильно и отдельно; любое исправление — ложное.
 pub fn run_adversarial(
     subject: &mut impl Subject,
@@ -731,6 +792,22 @@ pub fn evaluate(
         run_live(s, &corpus.en, us, ru_map, &format!("EN · {name}"), t);
         run_recall(s, &ru_words, ru_map, us, &format!("RU в US · {name}"), t);
         run_recall(s, &en_words, us, ru_map, &format!("EN в RU · {name}"), t);
+        run_flow(
+            s,
+            &corpus.ru,
+            ru_map,
+            us,
+            &format!("Поток RU в US · {name}"),
+            t,
+        );
+        run_flow(
+            s,
+            &corpus.en,
+            us,
+            ru_map,
+            &format!("Поток EN в RU · {name}"),
+            t,
+        );
         for slice in adversarial_slices(corpus, &ru_words, &en_words, lexicon, us, ru_map) {
             let own = if slice.lang == Lang::Ru { ru_map } else { us };
             let key = format!("{} · {name}", slice.name);

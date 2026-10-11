@@ -46,6 +46,8 @@ pub struct LiveRow {
 #[derive(Debug, Default)]
 pub struct RecallRow {
     pub dict: Counts,
+    /// Словарные от двух букв: цель ≥ 97% (однобуквенные меряются в потоке фразы).
+    pub dict2: Counts,
     pub oov: Counts,
     /// Исправлено, но не в задуманный текст (регистр, знак, другое слово).
     pub wrong: u64,
@@ -62,12 +64,24 @@ pub enum RecallOutcome {
     Missed,
 }
 
+/// Поток фразы: фраза набрана целиком в неверной раскладке, после исправления раскладка
+/// переключена. Однобуквенные — все и отдельно набранные ещё в неверной раскладке.
+#[derive(Debug, Default)]
+pub struct FlowRow {
+    pub phrases: Counts,
+    pub one_letter: Counts,
+    pub one_letter_wrong_layout: Counts,
+    /// Фразы, которые не набрать в одной из раскладок.
+    pub skipped: u64,
+}
+
 /// Результаты замера по срезам в порядке появления.
 #[derive(Debug, Default)]
 pub struct Tally {
     live: Vec<(String, LiveRow)>,
     recall: Vec<(String, RecallRow)>,
     adversarial: Vec<(String, Counts)>,
+    flow: Vec<(String, FlowRow)>,
 }
 
 fn row<'a, T: Default>(rows: &'a mut Vec<(String, T)>, slice: &str) -> &'a mut T {
@@ -107,6 +121,9 @@ impl Tally {
         } else {
             r.oov.add(fixed);
         }
+        if in_dict && letters >= 2 {
+            r.dict2.add(fixed);
+        }
         r.wrong += u64::from(outcome == RecallOutcome::Wrong);
         r.by_len[len_bucket(letters)].add(fixed);
         r.by_variant[variant as usize].add(fixed);
@@ -115,6 +132,48 @@ impl Tally {
     /// Слово, которое не удалось набрать в неверной раскладке.
     pub fn recall_skip(&mut self, slice: &str) {
         row(&mut self.recall, slice).skipped += 1;
+    }
+
+    /// Фраза потока: верна ли целиком; однобуквенные — (набрано в неверной раскладке, верно).
+    pub fn flow(&mut self, slice: &str, phrase_ok: bool, one_letter: &[(bool, bool)]) {
+        let r = row(&mut self.flow, slice);
+        r.phrases.add(phrase_ok);
+        for &(wrong_layout, ok) in one_letter {
+            r.one_letter.add(ok);
+            if wrong_layout {
+                r.one_letter_wrong_layout.add(ok);
+            }
+        }
+    }
+
+    pub fn flow_skip(&mut self, slice: &str) {
+        row(&mut self.flow, slice).skipped += 1;
+    }
+
+    pub fn flow_row(&self, slice: &str) -> Option<&FlowRow> {
+        find(&self.flow, slice)
+    }
+
+    pub fn flow_rows(&self) -> impl Iterator<Item = (&str, &FlowRow)> {
+        self.flow.iter().map(|(s, r)| (s.as_str(), r))
+    }
+
+    /// Худшая полнота по словарным словам от двух букв среди срезов, где они есть.
+    pub fn dict_recall_from2(&self) -> f64 {
+        self.recall
+            .iter()
+            .filter(|(_, r)| r.dict2.n > 0)
+            .map(|(_, r)| r.dict2.share())
+            .fold(1.0, f64::min)
+    }
+
+    /// Худшая доля верных фраз в потоке.
+    pub fn flow_phrases(&self) -> f64 {
+        self.flow
+            .iter()
+            .filter(|(_, r)| r.phrases.n > 0)
+            .map(|(_, r)| r.phrases.share())
+            .fold(1.0, f64::min)
     }
 
     pub fn adversarial(&mut self, slice: &str, corrected: bool) {
@@ -202,14 +261,15 @@ impl Tally {
             "\n#### Полнота на синтетических ошибках раскладки\n\n\
              Доля ошибок, исправленных точно в задуманный текст; в скобках — число ошибок. \
              «Не набрать» — слова, которых нет в таблице одной из раскладок; в полноту не входят.\n\n\
-             | Срез | Словарные | Внесловарные | Исправлено неверно | Не набрать | 1 буква | 2 | 3 | 4+ |\n\
-             |---|---|---|---|---|---|---|---|---|"
+             | Срез | Словарные | Словарные от 2 букв | Внесловарные | Исправлено неверно | Не набрать | 1 буква | 2 | 3 | 4+ |\n\
+             |---|---|---|---|---|---|---|---|---|---|"
         );
         for (slice, r) in &self.recall {
             let _ = writeln!(
                 out,
-                "| {slice} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {slice} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 pct(&r.dict),
+                pct(&r.dict2),
                 pct(&r.oov),
                 r.wrong,
                 r.skipped,
@@ -217,6 +277,24 @@ impl Tally {
                 pct(&r.by_len[1]),
                 pct(&r.by_len[2]),
                 pct(&r.by_len[3]),
+            );
+        }
+        let _ = writeln!(
+            out,
+            "\n#### Поток фразы\n\n\
+             Фраза набрана целиком в неверной раскладке; после первого исправления раскладка \
+             переключается, дальше слова набираются верно. Фраза верна, если в итоге на экране \
+             задуманный текст. Однобуквенные — все и отдельно те, что набраны ещё в неверной раскладке.\n\n\
+             | Срез | Верных фраз | 1 буква | 1 буква в неверной раскладке | Не набрать |\n|---|---|---|---|---|"
+        );
+        for (slice, r) in &self.flow {
+            let _ = writeln!(
+                out,
+                "| {slice} | {} | {} | {} | {} |",
+                pct(&r.phrases),
+                pct(&r.one_letter),
+                pct(&r.one_letter_wrong_layout),
+                r.skipped
             );
         }
         let _ = write!(out, "\n#### Полнота по вариантам набора\n\n| Срез |");

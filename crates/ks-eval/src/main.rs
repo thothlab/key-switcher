@@ -54,6 +54,7 @@ fn main() -> Result<()> {
     let en_words = recall_words(&corpus.en, Lang::En, &lexicon);
 
     let (worst_fp, worst_recall) = tally.headline();
+    let (recall_from2, flow_phrases) = (tally.dict_recall_from2(), tally.flow_phrases());
     let oov = |w: &[RecallWord]| {
         w.iter().filter(|w| !w.in_dict).count() as f64 * 100.0 / w.len().max(1) as f64
     };
@@ -84,8 +85,11 @@ fn main() -> Result<()> {
     writeln!(
         report,
         "**Итог:** худший срез живого текста — {worst_fp:.1} FP на 10 000 токенов (цель ≤ 10); \
-         худшая полнота по словарным словам — {:.1}% (цель ≥ 97%).\n",
-        worst_recall * 100.0
+         худшая полнота по словарным словам от 2 букв — {:.1}% (цель ≥ 97%), с однобуквенными — {:.1}%; \
+         худшая доля верных фраз в потоке — {:.1}%.\n",
+        recall_from2 * 100.0,
+        worst_recall * 100.0,
+        flow_phrases * 100.0
     )?;
     report.push_str(&tally.render_markdown());
     println!("{report}");
