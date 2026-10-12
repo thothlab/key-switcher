@@ -12,7 +12,8 @@ pub struct Scenario {
     pub name: String,
     /// `"en"` или `"ru"`.
     pub layout_before: String,
-    /// Клавиши W3C; `"Shift+KeyA"` — с Shift; `"ShiftLeft"`, `"AltLeft+ShiftLeft"` — жест из
+    /// Клавиши W3C; `"Shift+KeyA"` — с Shift; `"Meta+KeyZ"`, `"Ctrl+Alt+KeyK"` — сочетание
+    /// (модификаторы Shift, Ctrl, Alt, Meta нажимаются отдельно); `"ShiftLeft"`, `"AltLeft+ShiftLeft"` — жест из
     /// модификаторов (нажаты по порядку, отпущены в обратном); `"wait:300"` — пауза, мс.
     pub input: Vec<String>,
     pub expect_text: String,
@@ -38,6 +39,12 @@ pub enum Stroke {
     Modifiers(Vec<PhysicalKey>),
     /// Пауза, мс.
     Wait(u64),
+    /// Сочетание (`"Meta+KeyZ"`, `"Ctrl+Alt+KeyK"`): модификаторы нажимаются отдельно по
+    /// порядку, клавиша — с их флагами, модификаторы отпускаются в обратном порядке.
+    Chord {
+        mods: Vec<PhysicalKey>,
+        key: PhysicalKey,
+    },
 }
 
 #[derive(Deserialize)]
@@ -79,7 +86,22 @@ impl Scenario {
         match parts.as_slice() {
             [_] => Ok(Stroke::Key(last, false)),
             ["Shift", _] => Ok(Stroke::Key(last, true)),
-            _ => Err(err(format!("нажатие «{token}»: ждём Shift+Клавиша"))),
+            [prefix @ .., _] => {
+                let mods = prefix
+                    .iter()
+                    .map(|m| match *m {
+                        "Shift" => Ok(PhysicalKey::ShiftLeft),
+                        "Ctrl" => Ok(PhysicalKey::ControlLeft),
+                        "Alt" => Ok(PhysicalKey::AltLeft),
+                        "Meta" => Ok(PhysicalKey::MetaLeft),
+                        _ => Err(err(format!(
+                            "сочетание «{token}»: модификаторы Shift, Ctrl, Alt, Meta"
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Stroke::Chord { mods, key: last })
+            }
+            [] => Err(err(format!("пустое нажатие «{token}»"))),
         }
     }
 }
@@ -262,6 +284,12 @@ mod mac {
                 Stroke::Modifiers(keys) => {
                     if !probe::user_modifiers(&keys, GESTURE_GAP_MS) {
                         return Err("жест из модификаторов не отправлен".to_owned());
+                    }
+                }
+                Stroke::Chord { mods, key } => {
+                    let code = keycode::from_physical(key).ok_or(format!("нет кода для {key}"))?;
+                    if !probe::user_chord(&mods, code, GESTURE_GAP_MS) {
+                        return Err("сочетание не отправлено".to_owned());
                     }
                 }
                 Stroke::Wait(ms) => std::thread::sleep(Duration::from_millis(ms)),

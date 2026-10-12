@@ -1,15 +1,19 @@
 //! Агент: движок под мьютексом за `KeyHandler`, перехват бэкенда, таймер ручного управления,
 //! слежение за файлом настроек, сокет для `--status` и `--selftest`, трей. Цикл событий — на
 //! главном потоке (`tao`): он же обслуживает главную очередь, через которую бэкенд macOS зовёт
-//! TIS, и раз в секунду опрашивает безопасный ввод.
+//! TIS, и раз в секунду опрашивает безопасный ввод. Окно настроек — отдельный процесс
+//! `keyswitcher --settings`; агент открывает его из меню и сам — при старте без прав, ставит и
+//! убирает автозапуск по `config.autostart` и перезапускает себя по команде `restart`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ks_core::{Config, ConfigError, Engine, EngineStatus, Lexicon, Os, ResetReason};
-use ks_platform::{Backend, KeyHandler, TrayCommand, TrayModel};
+use ks_platform::{Backend, BackendError, KeyHandler, TrayCommand, TrayModel};
+use ks_settings::Section;
 
 use crate::handler::EngineHandler;
 use crate::paths;
@@ -36,13 +40,25 @@ pub enum Flow {
     Quit,
 }
 
+/// Запуск окна настроек на разделе (`None` — по умолчанию). Возвращает процесс окна, если он
+/// запущен; тесты подменяют запуск и процесс не создают.
+pub type Launcher = Box<dyn Fn(Option<Section>) -> std::io::Result<Option<Child>> + Send + Sync>;
+
 pub struct Agent {
     pub backend: Arc<dyn Backend>,
     pub handler: Arc<EngineHandler>,
+    lexicon: Arc<Lexicon>,
     config_path: Option<PathBuf>,
     secure_input: AtomicBool,
     layout_ids: Mutex<Vec<String>>,
     watcher: Mutex<Option<crate::watch::Watcher>>,
+    launcher: Launcher,
+    /// Окна настроек, запущенные агентом; завершённые собираются в `refresh`.
+    windows: Mutex<Vec<Child>>,
+    /// Отказ «автозапуск не поддерживается» пишется в журнал один раз.
+    autostart_unsupported_logged: AtomicBool,
+    /// Агент перезапускается: цикл событий выходит.
+    quit: AtomicBool,
 }
 
 impl Agent {
@@ -57,16 +73,32 @@ impl Agent {
         let builtin = lexicon.default_excluded_apps().to_vec();
         let layouts = backend.layouts();
         let layout_ids = layouts.0.iter().map(|m| m.id.0.clone()).collect();
-        let engine = Engine::new(Config::default_for(Os::current()), lexicon, layouts);
+        let engine = Engine::new(Config::default_for(Os::current()), lexicon.clone(), layouts);
         let handler = Arc::new(EngineHandler::new(engine, loaded, builtin));
         Agent {
             backend,
             handler,
+            lexicon,
             config_path,
             secure_input: AtomicBool::new(false),
             layout_ids: Mutex::new(layout_ids),
             watcher: Mutex::new(None),
+            launcher: Box::new(spawn_settings),
+            windows: Mutex::new(Vec::new()),
+            autostart_unsupported_logged: AtomicBool::new(false),
+            quit: AtomicBool::new(false),
         }
+    }
+
+    /// Свой запуск окна настроек (тесты).
+    pub fn with_launcher(mut self, launcher: Launcher) -> Agent {
+        self.launcher = launcher;
+        self
+    }
+
+    /// Агент просил цикл событий завершиться (перезапуск).
+    pub fn quit_requested(&self) -> bool {
+        self.quit.load(Ordering::SeqCst)
     }
 
     pub fn config_path(&self) -> Option<&Path> {
@@ -91,6 +123,46 @@ impl Agent {
         }
         crate::timer::spawn(self.handler.clone(), self.backend.clone());
         self.watch_config();
+        self.on_start();
+    }
+
+    /// Шаги старта без перехвата и потоков: автозапуск по настройкам и окно на «Разрешениях»,
+    /// если какого-то права нет (права TCC действуют только на новый процесс — окно объясняет и
+    /// перезапускает).
+    pub fn on_start(&self) {
+        self.sync_autostart();
+        if self.backend.permissions().iter().any(|p| !p.granted) {
+            self.open_settings(Some(Section::Permissions));
+        }
+    }
+
+    /// Запись автозапуска следует `config.autostart`. Битый файл её не трогает: в памяти тогда
+    /// умолчания, а не выбор пользователя.
+    fn sync_autostart(&self) {
+        if self.handler.config_error().is_some() {
+            return;
+        }
+        match self.backend.set_autostart(self.handler.config().autostart) {
+            Ok(()) => {}
+            Err(BackendError::Unsupported(why)) => {
+                if !self
+                    .autostart_unsupported_logged
+                    .swap(true, Ordering::Relaxed)
+                {
+                    log::info!("автозапуск не поставлен: {why}");
+                }
+            }
+            Err(e) => log::warn!("автозапуск не изменён: {e}"),
+        }
+    }
+
+    /// Окно настроек; второе окно само поднимает первое и выходит (`ks_settings::instance`).
+    fn open_settings(&self, section: Option<Section>) {
+        match (self.launcher)(section) {
+            Ok(Some(child)) => lock(&self.windows).push(child),
+            Ok(None) => {}
+            Err(e) => log::error!("окно настроек не запущено: {e}"),
+        }
     }
 
     /// Следит за файлом настроек: правка применяется без перезапуска.
@@ -114,7 +186,42 @@ impl Agent {
         let Some(path) = &self.config_path else {
             return false;
         };
-        self.handler.apply_config(Config::load(path))
+        self.apply_loaded(Config::load(path))
+    }
+
+    /// Прочитанный файл → движок и запись автозапуска. Один путь для слежения за файлом и для
+    /// перечитывания перед записью.
+    fn apply_loaded(&self, loaded: Result<Config, ConfigError>) -> bool {
+        let changed = self.handler.apply_config(loaded);
+        if changed {
+            self.sync_autostart();
+        }
+        changed
+    }
+
+    /// Любая запись агента: файл перечитывается (правка окна настроек, до которой слежение ещё
+    /// не дошло, не затирается), правка ложится поверх, результат пишется. Битый файл не
+    /// трогается — правка остаётся в памяти.
+    fn edit_and_save(&self, change: impl FnOnce(&EngineHandler) -> bool) {
+        if let Some(path) = &self.config_path
+            && let Ok(config) = Config::load(path)
+        {
+            self.apply_loaded(Ok(config));
+        }
+        if change(&self.handler) {
+            self.save();
+        }
+    }
+
+    /// Новый сеанс движка с текущими настройками и раскладками (перед `--selftest`).
+    pub fn fresh_engine(&self) {
+        let engine = Engine::new(
+            Config::default_for(Os::current()),
+            self.lexicon.clone(),
+            self.backend.layouts(),
+        );
+        self.handler.renew(engine);
+        log::info!("новый сеанс движка");
     }
 
     /// Пишет настройки в файл, если он не испорчен.
@@ -134,12 +241,8 @@ impl Agent {
     pub fn command(&self, cmd: &TrayCommand) -> Flow {
         match cmd {
             TrayCommand::Quit => return Flow::Quit,
-            TrayCommand::OpenSettings => open_settings(),
-            _ => {
-                if self.handler.command(cmd) {
-                    self.save();
-                }
-            }
+            TrayCommand::OpenSettings => self.open_settings(None),
+            _ => self.edit_and_save(|h| h.command(cmd)),
         }
         Flow::Continue
     }
@@ -163,9 +266,13 @@ impl Agent {
                 self.handler.set_layouts(layouts);
             }
         }
-        if self.handler.take_dirty() {
-            self.save();
+        if let Some(on) = self.handler.take_autocorrect_toggle() {
+            self.edit_and_save(|h| {
+                h.set_autocorrect(on);
+                true
+            });
         }
+        lock(&self.windows).retain_mut(|w| matches!(w.try_wait(), Ok(None)));
         self.model(secure)
     }
 
@@ -210,13 +317,45 @@ impl Agent {
             }
             #[cfg(target_os = "macos")]
             "selftest" => {
+                // Память отменённых слов живёт весь сеанс: без нового сеанса сценарии, которые
+                // ждут исправления, упали бы на словах, отменённых раньше.
+                self.fresh_engine();
                 let ok = crate::selftest::run(out, &*self.handler, &*self.backend);
                 let _ = writeln!(out, "RESULT: {}", if ok { "PASS" } else { "FAIL" });
             }
+            "pid" => {
+                let _ = writeln!(out, "{}", std::process::id());
+            }
+            "restart" => match self.restart() {
+                Ok(()) => {
+                    let _ = writeln!(out, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "перезапуск невозможен: {e}");
+                }
+            },
             _ => {
                 let _ = writeln!(out, "неизвестная команда");
             }
         }
+    }
+
+    /// «Перезапустить KeySwitcher» из окна: отвязанный процесс ждёт выхода агента и открывает
+    /// KeySwitcher.app заново, цикл событий агента выходит.
+    #[cfg(target_os = "macos")]
+    fn restart(&self) -> Result<(), String> {
+        let bundle =
+            ks_macos::bundle::current_bundle().ok_or("агент запущен не из KeySwitcher.app")?;
+        ks_macos::bundle::relaunch_after_exit(std::process::id(), &bundle)
+            .map_err(|e| e.to_string())?;
+        log::info!("перезапуск по просьбе окна настроек");
+        self.quit.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn restart(&self) -> Result<(), String> {
+        Err("перезапуск из окна есть только на macOS".to_owned())
     }
 
     #[cfg(unix)]
@@ -235,13 +374,18 @@ impl Agent {
     }
 }
 
-/// «Настройки…»: окно настроек — отдельный процесс `keyswitcher --settings`.
-fn open_settings() {
-    let spawned = std::env::current_exe()
-        .and_then(|exe| std::process::Command::new(exe).arg("--settings").spawn());
-    if let Err(e) = spawned {
-        log::error!("окно настроек не запущено: {e}");
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Окно настроек — отдельный процесс `keyswitcher --settings [--section <имя>]`.
+fn spawn_settings(section: Option<Section>) -> std::io::Result<Option<Child>> {
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.arg("--settings");
+    if let Some(section) = section {
+        cmd.args(["--section", section.name()]);
     }
+    cmd.spawn().map(Some)
 }
 
 /// Как часто опрашивается безопасный ввод и обновляется иконка.
@@ -288,6 +432,13 @@ pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
                 Err(e) => log::error!("иконка в строке меню не создана: {e}"),
             }
         }
+        if agent.quit_requested() {
+            if let Some(path) = paths::agent_socket() {
+                let _ = std::fs::remove_file(path);
+            }
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
         if let Some((_, commands)) = &tray {
             while let Ok(cmd) = commands.try_recv() {
                 if agent.command(&cmd) == Flow::Quit {
@@ -317,8 +468,9 @@ pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
     let agent = Arc::new(Agent::new(backend));
     agent.serve()?;
     agent.start();
-    loop {
+    while !agent.quit_requested() {
         let _ = agent.refresh();
         std::thread::sleep(REFRESH);
     }
+    Ok(())
 }

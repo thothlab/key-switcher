@@ -32,6 +32,13 @@ use super::system::{self, MainThreadMarker, on_main};
 use super::tap_thread::{self, TapPort};
 use crate::tap::{MARK_OWN, MacEvent};
 
+fn launch_agent_file() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(crate::bundle::launch_agent_path(std::path::Path::new(
+        &home,
+    )))
+}
+
 /// Как часто перечитывается право на эмуляцию ввода.
 const PERMISSION_POLL: Duration = Duration::from_secs(2);
 
@@ -409,18 +416,53 @@ impl Backend for MacBackend {
         }
     }
 
-    fn open_permission_settings(&self, _kind: PermissionKind) {
-        log::info!("раздел «Разрешения» появится в окне настроек (задача 07)");
+    /// Раздел «Конфиденциальность и безопасность» Системных настроек — через `/usr/bin/open`, без
+    /// главного потока: окно настроек зовёт это со своего главного потока.
+    fn open_permission_settings(&self, kind: PermissionKind) {
+        let pane = match kind {
+            PermissionKind::InputMonitoring => "Privacy_ListenEvent",
+            PermissionKind::Accessibility => "Privacy_Accessibility",
+            _ => return,
+        };
+        let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+        if let Err(e) = std::process::Command::new("/usr/bin/open")
+            .arg(url)
+            .status()
+        {
+            log::warn!("системные настройки не открыты: {e}");
+        }
     }
 
-    fn set_autostart(&self, _on: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(
-            "автозапуск ещё не реализован".to_owned(),
-        ))
+    /// Запись `~/Library/LaunchAgents/com.keyswitcher.app.plist` (`crate::bundle`); только для
+    /// процесса из KeySwitcher.app.
+    fn set_autostart(&self, on: bool) -> Result<(), BackendError> {
+        let exe = std::env::current_exe().map_err(|e| BackendError::Os(e.to_string()))?;
+        if crate::bundle::bundle_of(&exe).is_none() {
+            return Err(BackendError::Unsupported(
+                "автозапуск ставится только для KeySwitcher.app".to_owned(),
+            ));
+        }
+        let file = launch_agent_file()
+            .ok_or_else(|| BackendError::Os("не задан домашний каталог".to_owned()))?;
+        match crate::bundle::apply_launch_agent(&file, &exe, on) {
+            Ok(true) => {
+                log::info!(
+                    "автозапуск {}",
+                    if on {
+                        "включён"
+                    } else {
+                        "выключен"
+                    }
+                );
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(e) => Err(BackendError::Os(format!("запись автозапуска: {e}"))),
+        }
     }
 
     fn autostart(&self) -> bool {
-        false
+        launch_agent_file().is_some_and(|f| f.is_file())
     }
 
     fn health(&self) -> BackendHealth {

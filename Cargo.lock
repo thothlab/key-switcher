@@ -2481,6 +2481,8 @@ dependencies = [
  "anyhow",
  "eframe",
  "ks-core",
+ "ks-platform",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

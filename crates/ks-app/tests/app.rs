@@ -216,3 +216,44 @@ fn silent_client_does_not_block_the_agent_socket() {
     assert_eq!(lines, ["клавиатура отслеживается"]);
     let _ = std::fs::remove_file(&path);
 }
+
+/// ⌘Z в сценарии selftest: отдельное нажатие Cmd, клавиша с флагом Cmd, отпускание Cmd —
+/// как от клавиатуры (задача 10: одиночный Cmd окно отмены не закрывает).
+#[test]
+fn cmd_z_token_is_a_chord_with_a_separate_modifier_press() {
+    use ks_app::selftest::{Scenario, Stroke};
+    use ks_core::PhysicalKey as K;
+    let s = Scenario {
+        name: "chord".into(),
+        layout_before: "en".into(),
+        input: vec![
+            "Meta+KeyZ".into(),
+            "Shift+KeyA".into(),
+            "Ctrl+Alt+KeyK".into(),
+        ],
+        expect_text: String::new(),
+        expect_layout: "en".into(),
+        delay_ms: None,
+        select: None,
+        clipboard: None,
+    };
+    assert_eq!(
+        s.strokes().expect("сочетания разбираются"),
+        vec![
+            Stroke::Chord {
+                mods: vec![K::MetaLeft],
+                key: K::KeyZ
+            },
+            Stroke::Key(K::KeyA, true),
+            Stroke::Chord {
+                mods: vec![K::ControlLeft, K::AltLeft],
+                key: K::KeyK
+            },
+        ]
+    );
+    let bad = Scenario {
+        input: vec!["Hyper+KeyZ".into()],
+        ..s
+    };
+    assert!(bad.strokes().is_err(), "неизвестный модификатор — отказ");
+}

@@ -50,6 +50,37 @@ pub fn user_modifiers(keys: &[PhysicalKey], gap_ms: u64) -> bool {
     true
 }
 
+/// Сочетание (⌘Z, ⌃⌥K), как от клавиатуры пользователя: модификаторы нажимаются отдельными
+/// `FlagsChanged` по порядку, клавиша `keycode` — с их флагами, затем модификаторы отпускаются в
+/// обратном порядке; между шагами `gap_ms`. `false` — в `mods` не модификатор, ничего не отправлено.
+pub fn user_chord(mods: &[PhysicalKey], keycode: u16, gap_ms: u64) -> bool {
+    let Some(steps) = keycode::modifier_steps(mods) else {
+        return false;
+    };
+    let poster = CgPoster {
+        mark: MARK_SELFTEST,
+    };
+    let (downs, ups) = steps.split_at(mods.len());
+    for &(code, flags) in downs {
+        poster.flags_changed(code, flags);
+        poster.pause_ms(gap_ms);
+    }
+    let flags = downs.last().map_or(0, |&(_, f)| f);
+    for down in [true, false] {
+        poster.replay(&MacEvent {
+            keycode,
+            flags,
+            down,
+        });
+        poster.pause_ms(gap_ms);
+    }
+    for &(code, flags) in ups {
+        poster.flags_changed(code, flags);
+        poster.pause_ms(gap_ms);
+    }
+    true
+}
+
 /// Bundle id и pid приложения в фокусе.
 pub fn frontmost_app() -> Option<(String, i32)> {
     on_main(|_mtm| {

@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 use ks_app::agent::Agent;
 use ks_app::status::{MenuEntry, menu_entries};
 use ks_core::{
-    Action, AppId, Context, KeyDir, KeyEvent, Lang, LayoutId, LayoutMap, LayoutSet, Level,
-    Modifiers, PhysicalKey as K, ReplaceKind,
+    Action, AppId, Config, Context, Disposition, KeyDir, KeyEvent, Lang, LayoutId, LayoutMap,
+    LayoutSet, Level, Modifiers, PhysicalKey as K, ReplaceKind,
 };
 use ks_platform::{
     Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
     TrayCommand, TrayStatus,
 };
+use ks_settings::Section;
 
 const US: &str = "com.apple.keylayout.US";
 const RU: &str = "com.apple.keylayout.RussianWin";
@@ -51,6 +52,7 @@ struct FakeBackend {
     with_russian: bool,
     focused: Mutex<(AppId, String)>,
     executed: Mutex<Vec<Action>>,
+    autostart_calls: Mutex<Vec<bool>>,
 }
 
 impl FakeBackend {
@@ -61,6 +63,7 @@ impl FakeBackend {
             with_russian,
             focused: Mutex::new((AppId(TEXTEDIT.into()), "TextEdit".into())),
             executed: Mutex::new(Vec::new()),
+            autostart_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -106,7 +109,8 @@ impl Backend for FakeBackend {
     }
     fn request_permission(&self, _k: PermissionKind) {}
     fn open_permission_settings(&self, _k: PermissionKind) {}
-    fn set_autostart(&self, _on: bool) -> Result<(), BackendError> {
+    fn set_autostart(&self, on: bool) -> Result<(), BackendError> {
+        self.autostart_calls.lock().unwrap().push(on);
         Ok(())
     }
     fn autostart(&self) -> bool {
@@ -258,7 +262,9 @@ fn word_item_appears_only_after_undo_and_disappears_after_the_next_correction() 
             if label == "Не исправлять „ghbdtn“" && w == "ghbdtn")));
 
     typist.t += 1000;
-    let again = typist.type_keys(h, &ctx(TEXTEDIT, US), &word_and_space());
+    // Другое слово: отменённое «ghbdtn» в этом сеансе снова не исправляется (PRD 18c).
+    let ckjdj = [K::KeyC, K::KeyK, K::KeyJ, K::KeyD, K::KeyJ, K::Space];
+    let again = typist.type_keys(h, &ctx(TEXTEDIT, US), &ckjdj);
     assert!(replaced(&again, ReplaceKind::Auto));
     assert!(
         !has_word_item(&a.refresh()),
@@ -432,4 +438,286 @@ fn single_shift_switches_layout_by_timer_without_the_next_key() {
         [Action::SwitchLayout(LayoutId(RU.into()))]
     );
     assert_eq!(h.next_deadline(), None);
+}
+
+/// Ревью 06: кэш срока для потока таймера идёт за движком после каждого изменения (здесь —
+/// сброса): таймер не крутится по устаревшему сроку, а после срабатывания спит до `max_wait`.
+#[test]
+fn after_reset_the_timer_follows_the_engine_and_then_sleeps_until_max_wait() {
+    let backend = FakeBackend::new(true);
+    let (a, _) = agent("deadline", backend.clone(), None);
+    let h = &*a.handler;
+    let c = ctx(TEXTEDIT, US);
+    let mut typist = Typist {
+        t: ks_platform::clock_ms(),
+    };
+    typist.key(h, &c, K::ShiftLeft, KeyDir::Down);
+    typist.key(h, &c, K::ShiftLeft, KeyDir::Up);
+    assert!(h.next_deadline().is_some(), "одиночный Shift ждёт срок");
+    h.on_reset(ks_core::ResetReason::MouseClick);
+    assert_eq!(
+        h.next_deadline(),
+        None,
+        "сброс снимает срок одиночного Shift"
+    );
+    let start = Instant::now();
+    let due = h.wait_deadline(&ks_platform::clock_ms, Duration::from_millis(900));
+    assert!(!due, "срока нет — tick не нужен");
+    assert!(
+        start.elapsed() >= Duration::from_millis(850),
+        "таймер спал до max_wait, а не до старого срока Shift"
+    );
+    assert_eq!(
+        ks_app::timer::run_due(h, &*backend, ks_platform::clock_ms()),
+        0
+    );
+    assert!(
+        backend.executed.lock().unwrap().is_empty(),
+        "после сброса одиночный Shift раскладку не переключает"
+    );
+}
+
+/// Ревью 06: команда меню перечитывает файл перед записью — внешняя правка не затирается.
+#[test]
+fn menu_command_keeps_an_external_edit_not_yet_reloaded() {
+    let (a, path) = agent("merge", FakeBackend::new(true), None);
+    std::fs::write(&path, "version = 1\n[words]\nnever = [\"rjvg\"]\n").unwrap();
+    a.command(&TrayCommand::ToggleApp(AppId(TEXTEDIT.into())));
+    let saved = ks_core::Config::load(&path).unwrap();
+    assert_eq!(saved.words.never, ["rjvg"], "правка окна настроек цела");
+    assert_eq!(saved.apps.disabled, [AppId(TEXTEDIT.into())]);
+}
+
+/// Окно настроек KeySwitcher: набор в его полях и запись сочетания агент не трогает.
+#[test]
+fn own_settings_window_is_never_corrected() {
+    let (a, _) = agent("own", FakeBackend::new(true), None);
+    let mut typist = Typist { t: 1000 };
+    let out = typist.type_keys(
+        &*a.handler,
+        &ctx("com.keyswitcher.app", US),
+        &word_and_space(),
+    );
+    assert!(out.is_empty(), "{out:?}");
+}
+
+/// Ревью 06: файл перечитывается после тишины не короче паузы, а не через паузу от первого
+/// события (окно настроек может писать файл в несколько приёмов).
+#[test]
+fn config_is_reread_only_after_a_quiet_settle() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let start = Instant::now();
+    let sender = std::thread::spawn(move || {
+        for _ in 0..4 {
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(600));
+    });
+    rx.recv().unwrap();
+    assert!(ks_app::watch::wait_quiet(&rx, Duration::from_millis(250)));
+    let waited = start.elapsed();
+    assert!(waited >= Duration::from_millis(530), "{waited:?}");
+    sender.join().unwrap();
+}
+
+/// Перед каждым `--selftest` агент начинает сеанс движка заново (текущие настройки и
+/// раскладки): отменённые раньше слова снова исправляются, файл настроек не трогается.
+#[test]
+fn fresh_engine_session_forgets_undone_words_without_touching_the_file() {
+    let (a, path) = agent("fresh", FakeBackend::new(true), None);
+    let before = std::fs::read(&path).unwrap();
+    let h = &*a.handler;
+    let mut typist = Typist { t: 1000 };
+    let auto = typist.type_keys(h, &ctx(TEXTEDIT, US), &word_and_space());
+    assert!(replaced(&auto, ReplaceKind::Auto), "«ghbdtn » исправлено");
+    let undo = typist.type_keys(h, &ctx(TEXTEDIT, RU), &[K::ShiftLeft, K::ShiftLeft]);
+    assert!(replaced(&undo, ReplaceKind::Undo), "⇧⇧ отменил исправление");
+
+    typist.t += 1000;
+    h.on_reset(ks_core::ResetReason::External);
+    let again = typist.type_keys(h, &ctx(TEXTEDIT, US), &word_and_space());
+    assert!(
+        !replaced(&again, ReplaceKind::Auto),
+        "отменённое слово в этом сеансе не исправляется"
+    );
+
+    a.fresh_engine();
+    typist.t += 1000;
+    let fresh = typist.type_keys(h, &ctx(TEXTEDIT, US), &word_and_space());
+    assert!(
+        replaced(&fresh, ReplaceKind::Auto),
+        "в новом сеансе слово исправляется снова"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "новый сеанс движка не пишет файл"
+    );
+}
+
+/// Окна настроек, которые агент открыл бы, — по разделам; процесс не запускается.
+fn recording_launcher() -> (ks_app::agent::Launcher, Arc<Mutex<Vec<Option<Section>>>>) {
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let log = opened.clone();
+    let launcher: ks_app::agent::Launcher = Box::new(move |section| {
+        log.lock().unwrap().push(section);
+        Ok(None)
+    });
+    (launcher, opened)
+}
+
+/// app-shell «Права не выданы»: агент без прав при старте сам открывает окно на «Разрешениях» —
+/// один раз; с правами окно не открывается.
+#[test]
+fn start_without_permissions_opens_the_window_on_permissions_once() {
+    let backend = FakeBackend::new(true);
+    backend.granted.store(false, Ordering::SeqCst);
+    let (launcher, opened) = recording_launcher();
+    let a =
+        Agent::with_config_path(backend, Some(config_path("perm-missing"))).with_launcher(launcher);
+    a.on_start();
+    assert_eq!(*opened.lock().unwrap(), vec![Some(Section::Permissions)]);
+
+    let (launcher, opened) = recording_launcher();
+    let a = Agent::with_config_path(FakeBackend::new(true), Some(config_path("perm-granted")))
+        .with_launcher(launcher);
+    a.on_start();
+    assert!(
+        opened.lock().unwrap().is_empty(),
+        "права есть — окно не открывается"
+    );
+}
+
+/// «Настройки…» из меню открывает окно на разделе по умолчанию через тот же запуск.
+#[test]
+fn menu_settings_command_launches_the_window() {
+    let (launcher, opened) = recording_launcher();
+    let a = Agent::with_config_path(FakeBackend::new(true), Some(config_path("menu-settings")))
+        .with_launcher(launcher);
+    a.command(&TrayCommand::OpenSettings);
+    assert_eq!(*opened.lock().unwrap(), vec![None]);
+}
+
+/// app-shell «Выключение автозапуска»: окно пишет только `autostart` в файл, а запись входа в
+/// систему ставит и убирает агент — при старте и после перечитывания файла.
+#[test]
+fn autostart_follows_the_settings_file() {
+    let backend = FakeBackend::new(true);
+    let (launcher, _) = recording_launcher();
+    let (a, path) = agent("autostart", backend.clone(), None);
+    let a = Arc::try_unwrap(a).ok().unwrap().with_launcher(launcher);
+    a.on_start();
+    assert_eq!(
+        *backend.autostart_calls.lock().unwrap(),
+        vec![true],
+        "по умолчанию включён"
+    );
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("autostart = true"));
+    std::fs::write(&path, text.replace("autostart = true", "autostart = false")).unwrap();
+    assert!(a.reload_config());
+    assert_eq!(*backend.autostart_calls.lock().unwrap(), vec![true, false]);
+
+    std::fs::write(&path, "это не toml [").unwrap();
+    a.reload_config();
+    assert_eq!(
+        *backend.autostart_calls.lock().unwrap(),
+        vec![true, false],
+        "битый файл автозапуск не трогает"
+    );
+}
+
+/// «Перезапустить KeySwitcher» вне KeySwitcher.app: агент отвечает отказом и продолжает работать.
+#[test]
+fn restart_outside_the_app_bundle_is_refused_and_the_agent_keeps_running() {
+    let (a, _) = agent("restart", FakeBackend::new(true), None);
+    let mut out = Vec::new();
+    a.respond("restart", &mut out);
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.lines().any(|l| l == "OK"), "ответ: {text}");
+    assert!(!a.quit_requested());
+}
+
+fn event(key: K, dir: KeyDir, mods: Modifiers, time_ms: u64) -> KeyEvent {
+    KeyEvent {
+        key,
+        dir,
+        mods,
+        repeat: false,
+        time_ms,
+    }
+}
+
+/// Ревью 07: переключение «оба Shift» записывается поверх правки файла, которую агент ещё не
+/// перечитал, а применённая при этом правка идёт тем же путём, что слежение (с автозапуском).
+#[test]
+fn both_shifts_toggle_is_saved_over_an_external_edit_not_yet_reloaded() {
+    let backend = FakeBackend::new(true);
+    let (a, path) = agent("both-shifts", backend.clone(), None);
+    let h = &*a.handler;
+    let mut external = Config::load(&path).unwrap();
+    assert!(external.autocorrect && external.single_shift_switch && external.autostart);
+    external.single_shift_switch = false;
+    external.autostart = false;
+    external.save(&path).unwrap();
+
+    let c = ctx(TEXTEDIT, US);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    for ev in [
+        event(K::ShiftLeft, KeyDir::Down, shift, 1_000),
+        event(K::ShiftRight, KeyDir::Down, shift, 1_030),
+        event(K::ShiftRight, KeyDir::Up, shift, 1_080),
+        event(K::ShiftLeft, KeyDir::Up, Modifiers::default(), 1_100),
+    ] {
+        h.on_key(&ev, &c);
+    }
+    assert!(!h.autocorrect(), "оба Shift выключили автоисправление");
+
+    a.refresh();
+    let saved = Config::load(&path).unwrap();
+    assert!(!saved.autocorrect, "переключение записано");
+    assert!(!saved.single_shift_switch, "внешняя правка не затёрта");
+    assert!(!saved.autostart, "внешняя правка не затёрта");
+    assert_eq!(
+        backend.autostart_calls.lock().unwrap().last(),
+        Some(&false),
+        "перечитанный файл применён вместе с автозапуском"
+    );
+}
+
+/// Ревью 07: назначенное сочетание, нажатое в окне самого KeySwitcher (запись хоткея), действие
+/// не запускает; в другом приложении то же сочетание срабатывает.
+#[test]
+fn assigned_hotkey_pressed_in_own_window_does_nothing() {
+    let (a, path) = agent("own-hotkey", FakeBackend::new(true), None);
+    let mut config = Config::load(&path).unwrap();
+    config.hotkeys.convert_selection = vec!["Ctrl+Alt+KeyK".parse().unwrap()];
+    config.save(&path).unwrap();
+    assert!(a.reload_config());
+    let mods = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    let press = |app: &str, t: u64| {
+        let c = ctx(app, US);
+        let down = a.handler.on_key(&event(K::KeyK, KeyDir::Down, mods, t), &c);
+        a.handler
+            .on_key(&event(K::KeyK, KeyDir::Up, mods, t + 30), &c);
+        down
+    };
+    let elsewhere = press(TEXTEDIT, 1_000);
+    assert_eq!(
+        elsewhere.actions,
+        vec![Action::ConvertSelection],
+        "контроль"
+    );
+    let own = press("com.keyswitcher.app", 2_000);
+    assert!(own.actions.is_empty(), "{:?}", own.actions);
+    assert_eq!(own.disposition, Disposition::Pass, "нажатие уходит в окно");
 }

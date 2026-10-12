@@ -1,7 +1,8 @@
 //! Слежение за файлом настроек (`notify`). Смотрим каталог, а не файл: `Config::save` и
 //! редакторы пишут временный файл и переименовывают его, слежение за самим файлом умерло бы
-//! после первой записи. События одного сохранения склеиваются (редактор может обрезать файл и
-//! писать его в несколько приёмов).
+//! после первой записи. События одного сохранения склеиваются: файл перечитывается после
+//! тишины `SETTLE`, а не через `SETTLE` от первого события (редактор и окно настроек могут
+//! писать файл в несколько приёмов).
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -11,7 +12,7 @@ use notify::{RecursiveMode, Watcher as _};
 
 pub type Watcher = notify::RecommendedWatcher;
 
-/// Сколько ждать после первого события, прежде чем перечитать файл.
+/// Сколько тишины после последнего события ждать, прежде чем перечитать файл.
 const SETTLE: Duration = Duration::from_millis(200);
 
 /// Зовёт `on_change` после изменения файла `path`; слежение живёт, пока жив `Watcher`.
@@ -36,11 +37,24 @@ pub fn watch(path: &Path, on_change: impl Fn() + Send + 'static) -> notify::Resu
         .name("ks-config-watch".to_owned())
         .spawn(move || {
             while rx.recv().is_ok() {
-                std::thread::sleep(SETTLE);
-                while rx.try_recv().is_ok() {}
+                if !wait_quiet(&rx, SETTLE) {
+                    return;
+                }
                 on_change();
             }
         })
         .map_err(notify::Error::io)?;
     Ok(watcher)
+}
+
+/// После первого события ждёт тишины длиной `settle` (каждое новое событие отсчёт начинает
+/// заново); `false` — слежение закрыто.
+pub fn wait_quiet(rx: &mpsc::Receiver<()>, settle: Duration) -> bool {
+    loop {
+        match rx.recv_timeout(settle) {
+            Ok(()) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
 }

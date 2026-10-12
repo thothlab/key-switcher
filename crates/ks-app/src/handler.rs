@@ -23,7 +23,8 @@ struct State {
     /// Слово для пункта «Не исправлять „…“»: ставится отменой, снимается следующим исправлением.
     undone_word: Option<String>,
     /// Настройки поменялись хоткеем и ещё не записаны в файл.
-    dirty: bool,
+    /// Значение автоисправления, выставленное хоткеем и ещё не записанное в файл.
+    toggled: Option<bool>,
 }
 
 pub struct EngineHandler {
@@ -47,7 +48,7 @@ impl EngineHandler {
                 config: Config::default_for(Os::current()),
                 config_error: None,
                 undone_word: None,
-                dirty: false,
+                toggled: None,
             }),
             builtin_excluded,
             deadline: Mutex::new(None),
@@ -77,6 +78,7 @@ impl EngineHandler {
         state.config = config;
         state.config_error = error;
         engine.set_config(state.config.clone());
+        self.sync_deadline(&engine);
         true
     }
 
@@ -116,8 +118,22 @@ impl EngineHandler {
             .excludes(app, &self.builtin_excluded)
     }
 
+    /// Новый сеанс движка с теми же настройками: слово в работе, память отменённых слов и
+    /// пункт «Не исправлять „…“» забываются. На диск ничего не пишется.
+    pub fn renew(&self, mut fresh: Engine) {
+        let mut engine = lock(&self.engine);
+        let mut state = lock(&self.state);
+        fresh.set_config(state.config.clone());
+        *engine = fresh;
+        state.undone_word = None;
+        drop(state);
+        self.sync_deadline(&engine);
+    }
+
     pub fn set_layouts(&self, layouts: LayoutSet) {
-        lock(&self.engine).set_layouts(layouts);
+        let mut engine = lock(&self.engine);
+        engine.set_layouts(layouts);
+        self.sync_deadline(&engine);
     }
 
     /// Команда меню, меняющая настройки. `true` — настройки изменились и их надо записать.
@@ -143,6 +159,7 @@ impl EngineHandler {
             TrayCommand::OpenSettings | TrayCommand::Quit => return false,
         }
         engine.set_config(state.config.clone());
+        self.sync_deadline(&engine);
         true
     }
 
@@ -152,9 +169,19 @@ impl EngineHandler {
         state.config_error.is_none().then(|| state.config.clone())
     }
 
-    /// Снимает отметку «изменено хоткеем»; `true` — была.
-    pub fn take_dirty(&self) -> bool {
-        std::mem::take(&mut lock(&self.state).dirty)
+    /// Снимает отметку «автоисправление переключено хоткеем»: значение, которое надо записать
+    /// поверх перечитанного файла. Перечитывание между хоткеем и записью значение не теряет.
+    pub fn take_autocorrect_toggle(&self) -> Option<bool> {
+        lock(&self.state).toggled.take()
+    }
+
+    /// Автоисправление вкл./выкл. (запись переключения хоткеем поверх перечитанного файла).
+    pub fn set_autocorrect(&self, on: bool) {
+        let mut engine = lock(&self.engine);
+        let mut state = lock(&self.state);
+        state.config.autocorrect = on;
+        engine.set_config(state.config.clone());
+        self.sync_deadline(&engine);
     }
 
     /// Ждёт, пока срок таймера не пройдёт (строго после `next_deadline`) по часам `now`;
@@ -189,7 +216,7 @@ impl EngineHandler {
             match action {
                 Action::ToggleAutocorrect => {
                     state.config.autocorrect = !state.config.autocorrect;
-                    state.dirty = true;
+                    state.toggled = Some(state.config.autocorrect);
                     engine.set_config(state.config.clone());
                     log::info!("автоисправление: {}", state.config.autocorrect);
                 }
@@ -202,6 +229,12 @@ impl EngineHandler {
             }
         }
         actions.retain(|a| !matches!(a, Action::ToggleAutocorrect));
+        self.sync_deadline(engine);
+    }
+
+    /// Кэш срока для потока таймера — после каждого изменения движка: иначе после сброса или
+    /// новых настроек таймер крутился бы на мьютексе движка по устаревшему сроку.
+    fn sync_deadline(&self, engine: &Engine) {
         let deadline = engine.next_deadline();
         let mut at = lock(&self.deadline);
         if *at != deadline {
@@ -211,8 +244,16 @@ impl EngineHandler {
     }
 }
 
+/// Идентификаторы самого KeySwitcher (окно настроек) на трёх ОС: там агент ничего не делает —
+/// иначе слово, набранное в поле «Слова-исключения», исправилось бы, а запись сочетания
+/// запускала бы действия.
+pub const OWN_APP_IDS: [&str; 3] = ["com.keyswitcher.app", "keyswitcher.exe", "keyswitcher"];
+
 impl KeyHandler for EngineHandler {
     fn on_key(&self, ev: &KeyEvent, ctx: &Context) -> Outcome {
+        if OWN_APP_IDS.contains(&ctx.app.0.as_str()) {
+            return Outcome::pass();
+        }
         let mut engine = lock(&self.engine);
         let mut state = lock(&self.state);
         let mut out = engine.on_key(ev, ctx);
@@ -221,7 +262,9 @@ impl KeyHandler for EngineHandler {
     }
 
     fn on_reset(&self, why: ResetReason) {
-        lock(&self.engine).on_reset(why);
+        let mut engine = lock(&self.engine);
+        engine.on_reset(why);
+        self.sync_deadline(&engine);
     }
 
     fn convert_text(&self, text: &str) -> Option<String> {

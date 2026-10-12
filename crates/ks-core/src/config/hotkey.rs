@@ -32,7 +32,12 @@ pub enum HotkeyError {
     Duplicate(Hotkey),
     #[error("сочетание — одиночная буква или цифра без модификатора")]
     BareKey(Hotkey),
+    #[error("на одно действие — не больше двух сочетаний")]
+    TooMany,
 }
+
+/// Сколько назначений допускается на одно действие (PRD 31).
+pub const MAX_PER_ACTION: usize = 2;
 
 impl TryFrom<String> for Hotkey {
     type Error = HotkeyError;
@@ -109,8 +114,17 @@ impl fmt::Display for Hotkey {
     }
 }
 
-/// Дубли между всеми действиями и одиночная буква или цифра без модификатора — ошибка.
+/// Больше двух на действие, дубли между всеми действиями и одиночная буква или цифра без
+/// модификатора — ошибка.
 pub fn validate_hotkeys(h: &HotkeyConfig) -> Result<(), HotkeyError> {
+    let actions = [
+        &h.undo_or_convert_word,
+        &h.convert_selection,
+        &h.toggle_autocorrect,
+    ];
+    if actions.iter().any(|a| a.len() > MAX_PER_ACTION) {
+        return Err(HotkeyError::TooMany);
+    }
     let mut seen = HashSet::new();
     let all = h
         .undo_or_convert_word

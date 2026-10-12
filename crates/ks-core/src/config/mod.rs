@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub use hotkey::{Hotkey, HotkeyError, validate_hotkeys};
+pub use hotkey::{Hotkey, HotkeyError, MAX_PER_ACTION, validate_hotkeys};
 
 use crate::{AppId, Modifiers, PhysicalKey};
 
@@ -134,7 +134,7 @@ impl Config {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("toml.tmp");
+        let tmp = temp_path(path);
         {
             let mut file = fs::File::create(&tmp)?;
             file.write_all(text.as_bytes())?;
@@ -142,6 +142,18 @@ impl Config {
         }
         fs::rename(&tmp, path)
     }
+}
+
+/// Временный файл записи рядом с `path`: свой у каждой записи (pid + счётчик) — файл пишут два
+/// процесса, агент и окно настроек, и общий временный файл они перетирали бы друг у друга.
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.{}.{n}.tmp", std::process::id()))
 }
 
 impl AppRules {
@@ -173,18 +185,41 @@ impl AppRules {
     }
 }
 
-/// Имя ключа для сообщений: только «голые» ключи TOML; прочее (кавычки, не ASCII) может
-/// оказаться словом пользователя и не показывается.
-fn shown_key(key: &str) -> String {
+/// Имя ключа для сообщений: только «голые» ключи TOML вне раздела `[words]`; прочее (кавычки,
+/// не ASCII, любой ключ внутри `[words]` или `words.…`) может оказаться словом пользователя и
+/// не показывается. `section` — раздел, в котором стоит ключ.
+fn shown_key(section: Option<&str>, key: &str) -> String {
     let bare = !key.is_empty()
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-    if bare {
+    if bare && !in_words(section, key) {
         key.to_owned()
     } else {
         "(имя скрыто)".to_owned()
     }
+}
+
+/// Ключ лежит в разделе слов: `[words]`, `[words.…]` или пунктирный `words.…` сверху.
+fn in_words(section: Option<&str>, key: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\''))
+            .collect()
+    };
+    let words = |s: &str| s == "words" || s.starts_with("words.");
+    let (section, key) = (section.map(norm), norm(key));
+    // Имя из модели настроек — не слово пользователя.
+    let known = (section.as_deref() == Some("words") && key == "never") || key == "words.never";
+    !known && (section.is_some_and(|s| words(&s)) || key.starts_with("words."))
+}
+
+/// Раздел (`[имя]`), в котором стоит текст до `before`.
+fn section_of(before: &str) -> Option<&str> {
+    before.lines().rev().find_map(|l| {
+        let t = l.trim().strip_prefix('[')?;
+        t.trim_start_matches('[').split(']').next()
+    })
 }
 
 /// Ошибка разбора без значений: сообщение toml/serde цитирует значение (`never = "слово"`
@@ -202,7 +237,7 @@ fn parse_error(text: &str, e: &toml::de::Error) -> ConfigError {
     match line.split_once('=').map(|(key, _)| key.trim()) {
         Some(key) if !key.is_empty() => ConfigError::Parse(format!(
             "строка {line_no}, ключ {}: неверное значение или синтаксис",
-            shown_key(key)
+            shown_key(section_of(&text[..line_start]), key)
         )),
         _ => ConfigError::Parse(format!("строка {line_no}: ошибка синтаксиса")),
     }
@@ -232,12 +267,12 @@ fn unknown_keys(text: &str) -> Vec<String> {
             continue;
         }
         let Some((_, known)) = SECTIONS.iter().find(|(name, _)| name == key) else {
-            unknown.push(shown_key(key));
+            unknown.push(shown_key(None, key));
             continue;
         };
         if let Some(section) = value.as_table() {
             for inner in section.keys().filter(|k| !known.contains(&k.as_str())) {
-                unknown.push(format!("{key}.{}", shown_key(inner)));
+                unknown.push(format!("{key}.{}", shown_key(Some(key), inner)));
             }
         }
     }
@@ -355,8 +390,93 @@ mod tests {
         assert_eq!(config.words.never, ["rjvg"]);
         let logged = LOGGED.lock().unwrap().join("\n");
         assert!(logged.contains("future_flag"), "{logged}");
-        assert!(logged.contains("words.extra"), "{logged}");
+        assert!(logged.contains("words."), "{logged}");
         assert!(!logged.contains("значение"), "{logged}");
         let _ = fs::remove_file(path);
+    }
+
+    /// Ключ внутри `[words]` может быть набранным словом: ни в журнал, ни в текст ошибки.
+    #[test]
+    fn keys_inside_words_are_never_shown() {
+        capture_logs();
+        let path = write(
+            "wordkey",
+            "version = 1\n[words]\nnever = []\nghbdtnlog = 1\n",
+        );
+        Config::load(&path).expect("неизвестный ключ не ошибка");
+        let logged = LOGGED.lock().unwrap().join("\n");
+        assert!(!logged.contains("ghbdtnlog"), "{logged}");
+        for (name, text, word) in [
+            (
+                "wordsec",
+                "version = 1\n[words]\nghbdtnsec = \n",
+                "ghbdtnsec",
+            ),
+            ("worddot", "version = 1\nwords.ghbdtndot = \n", "ghbdtndot"),
+            ("wordarr", "version = 1\n[words]\nnever = 5\n", "never"),
+        ] {
+            let p = write(name, text);
+            let shown = Config::load(&p).expect_err("битый файл").to_string();
+            if word == "never" {
+                assert!(shown.contains("строка 3"), "{shown}");
+            } else {
+                assert!(!shown.contains(word), "{shown}");
+            }
+            let _ = fs::remove_file(p);
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    /// PRD 31: до двух назначений на действие.
+    #[test]
+    fn more_than_two_hotkeys_per_action_are_rejected() {
+        let mut h = HotkeyConfig::default_for(Os::MacOs);
+        h.convert_selection.push("Ctrl+Alt+KeyK".parse().unwrap());
+        assert_eq!(validate_hotkeys(&h), Ok(()), "два — можно");
+        h.convert_selection.push("Ctrl+Alt+KeyJ".parse().unwrap());
+        let err = validate_hotkeys(&h).expect_err("три — нельзя");
+        assert!(!err.to_string().contains("Key"), "{err}");
+    }
+
+    /// Ревью 07: файл пишут два процесса (агент и окно настроек) — у каждой записи свой временный
+    /// файл, rename атомарен, хвостов не остаётся.
+    #[test]
+    fn every_save_uses_its_own_temp_file() {
+        let path =
+            std::env::temp_dir().join(format!("ks-config-{}-saves.toml", std::process::id()));
+        let (first, second) = (temp_path(&path), temp_path(&path));
+        assert_ne!(first, second);
+        let pid = std::process::id().to_string();
+        assert!(
+            first.to_string_lossy().contains(&pid),
+            "{}",
+            first.display()
+        );
+        assert_eq!(first.parent(), path.parent(), "rename в пределах каталога");
+
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        Config::default_for(Os::current()).save(&path).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        Config::load(&path).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let leftovers = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(&name) && n.ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }
