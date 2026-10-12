@@ -238,8 +238,14 @@ impl Window {
         };
         let (action, slot) = (*action, *slot);
         // ⌘Пробел во время записи открывает Spotlight, окно уходит в фон: запись снимается, а не
-        // висит «Нажмите сочетание…»
-        if !ctx.input(|i| i.focused) {
+        // висит «Нажмите сочетание…». Только по событию потери фокуса: флаг `focused` egui-winit
+        // на macOS до первого события ложный (winit #4371), по нему запись бы не началась.
+        let lost_focus = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+        });
+        if lost_focus {
             self.recording = None;
             return;
         }
