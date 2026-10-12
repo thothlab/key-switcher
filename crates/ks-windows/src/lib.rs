@@ -1,70 +1,24 @@
-//! Бэкенд Windows — заготовка. Перехват, эмуляцию ввода и таблицы раскладок из API ОС
-//! добавляет задача этого бэкенда; до тех пор всё, что зовётся при старте, возвращает `Err`.
+//! Бэкенд Windows: хук `WH_KEYBOARD_LL` на выделенном потоке со своим циклом сообщений,
+//! исполнение замен через `SendInput`, смена раскладки окна с фокусом
+//! (`WM_INPUTLANGCHANGEREQUEST`), таблицы раскладок из `ToUnicodeEx`, буфер обмена, автозапуск
+//! через ключ `Run`. Модель исполнения (удержание, исполнитель, срок) — общая, в
+//! `ks_platform::intercept`. Модули без системных вызовов (`keycode`, `tap`, `send`, `layouts`,
+//! `klc`, `apps`, `clip`) проверяются тестами на любой ОС; системная часть `sys` — только Windows.
 
-use std::sync::Arc;
+pub mod apps;
+pub mod clip;
+pub mod keycode;
+pub mod klc;
+pub mod layouts;
+pub mod send;
+pub mod tap;
 
-use ks_core::{Action, AppId, LayoutId, LayoutSet};
-use ks_platform::{
-    Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
-};
+#[cfg(windows)]
+mod sys;
+#[cfg(windows)]
+pub use sys::WindowsBackend;
 
-const NOT_YET: &str = "бэкенд Windows ещё не реализован";
-
-#[derive(Debug, Default)]
-pub struct WindowsBackend;
-
-impl WindowsBackend {
-    pub fn new() -> WindowsBackend {
-        WindowsBackend
-    }
-}
-
-impl Backend for WindowsBackend {
-    fn start(&self, _handler: Arc<dyn KeyHandler>) -> Result<(), BackendError> {
-        log::warn!("{NOT_YET}");
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn execute(&self, _action: &Action) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn layouts(&self) -> LayoutSet {
-        LayoutSet::default()
-    }
-
-    fn current_layout(&self) -> LayoutId {
-        LayoutId::default()
-    }
-
-    fn focused_app(&self) -> (AppId, String) {
-        (AppId::default(), String::new())
-    }
-
-    fn secure_input(&self) -> bool {
-        false
-    }
-
-    fn permissions(&self) -> Vec<PermissionStatus> {
-        Vec::new()
-    }
-
-    fn request_permission(&self, _kind: PermissionKind) {}
-
-    fn open_permission_settings(&self, _kind: PermissionKind) {}
-
-    fn set_autostart(&self, _on: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn autostart(&self) -> bool {
-        false
-    }
-
-    fn health(&self) -> BackendHealth {
-        BackendHealth {
-            detail: NOT_YET.to_owned(),
-            ..BackendHealth::default()
-        }
-    }
-}
+#[cfg(not(windows))]
+mod stub;
+#[cfg(not(windows))]
+pub use stub::WindowsBackend;

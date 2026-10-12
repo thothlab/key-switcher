@@ -1,10 +1,12 @@
 # KeySwitcher: фикстура раскладки Windows «Русская» (KBDRU)
-# источник: таблица analysis/detection.md §7 (kbdru.dll 10.0.29667.1000, KLC с kbdlayout.info/kbdru): совпадает с macOS «Русская – ПК»
-# (ru_pc.tsv) во всех клавишах, кроме Backquote (Shift даёт кириллическую Ё) и IntlBackslash (у keycode 10 прямого аналога нет — строка опущена).
-# Слой Shift+Caps для букв — строчная (CapsLock на Windows работает как Shift), для прочих — как Shift.
-# TODO(prd): @id — условный KLID 00000419; формат id раскладки Windows (HKL/KLID) решает бэкенд Windows
+# источник: KLC kbdru.dll 10.0.29667.1000 с kbdlayout.info/kbdru (копия разделов — crates/ks-windows/tests/fixtures/kbdru.klc),
+# сверено тестом crates/ks-windows/tests/seams.rs (задача 08). Совпадает с macOS «Русская – ПК» (ru_pc.tsv), кроме Backquote
+# (Shift даёт кириллическую Ё) и IntlBackslash (OEM_102, скан-код 56 — клавиша ISO между левым Shift и Z: `\` / `/`, как Backslash).
+# Слой Caps: у букв (Cap=1 в KLC) — как Shift, у прочих — как Base; Shift+Caps у букв — строчная, у прочих — как Shift.
+# Слой AltGr (₽ на AltGr+8) и десятичная клавиша цифрового блока (`,`) в четыре уровня таблицы не входят.
+# @id — HKL раскладки как 8 шестнадцатеричных цифр (формат LayoutId бэкенда Windows).
 # колонки: код W3C, Base, Shift, Caps, Shift+Caps; пусто — символа нет
-@id	00000419
+@id	04190419
 @lang	ru
 @name	Русская (KBDRU)
 KeyA	ф	Ф	Ф	ф
@@ -54,3 +56,4 @@ KeyN	т	Т	Т	т
 KeyM	ь	Ь	Ь	ь
 Period	ю	Ю	Ю	ю
 Backquote	ё	Ё	Ё	ё
+IntlBackslash	\	/	\	/
