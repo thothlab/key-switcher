@@ -9,8 +9,8 @@
 //!   квант, размер алфавита со служебными символами (0 — граница, 1 — символ вне алфавита),
 //!   длина алфавита в байтах (`u16` LE), алфавит UTF-8, плотная таблица квантованных `−ln P`;
 //! - `short_words.tsv` — `язык\tслово`;
-//! - `excluded_apps.tsv` — `ОС\tкатегория\tидентификатор\tсверка`; встраиваются все ОС,
-//!   в [`Lexicon`] остаются строки текущей;
+//! - `excluded_apps.tsv` — `ОС\tкатегория\tидентификатор\tсверка\tназвание\tсемейство`;
+//!   встраиваются все ОС, в [`Lexicon`] остаются строки текущей;
 //! - `weak_forms.tsv` — `язык\tформа\tобраз`: редкие словарные формы, которые не защищены
 //!   словарным вето (курируемый список, обоснования — в `tools/ks-datagen/curated/weak_forms.tsv`).
 //!
@@ -34,6 +34,40 @@ pub enum Lang {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AppId(pub String);
+
+/// Категория встроенного списка исключённых приложений.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AppCategory {
+    Terminal,
+    Ide,
+    Editor,
+    Password,
+    Remote,
+}
+
+impl AppCategory {
+    fn parse(s: &str) -> Option<AppCategory> {
+        Some(match s {
+            "terminal" => AppCategory::Terminal,
+            "ide" => AppCategory::Ide,
+            "editor" => AppCategory::Editor,
+            "password" => AppCategory::Password,
+            "remote" => AppCategory::Remote,
+            _ => return None,
+        })
+    }
+}
+
+/// Строка встроенного списка для окна настроек: что это за приложение.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinApp {
+    pub id: AppId,
+    pub category: AppCategory,
+    /// Как приложение зовётся в системе («Терминал», «IntelliJ IDEA»).
+    pub name: &'static str,
+    /// Несколько приложений одной строкой окна («JetBrains IDE и Android Studio»).
+    pub family: Option<&'static str>,
+}
 
 /// Оценка [`Lexicon::lm_score`] для языка без модели и нижняя граница любой оценки (в натах).
 pub const LM_MIN_SCORE: f32 = -25.5;
@@ -74,6 +108,7 @@ pub struct Lexicon {
     ru: LangData,
     empty: HashSet<String>,
     excluded_apps: Vec<AppId>,
+    builtin_apps: Vec<BuiltinApp>,
 }
 
 impl Lexicon {
@@ -96,18 +131,27 @@ impl Lexicon {
                 .map(|form| normalize(form).into_owned())
                 .collect(),
         };
+        let builtin_apps: Vec<BuiltinApp> = rows(EXCLUDED_APPS)
+            .filter_map(|row| {
+                let cols: Vec<&'static str> = row.split('\t').collect();
+                let [os, category, id, _check, name, family] = cols[..] else {
+                    panic!("встроенный список приложений повреждён: {row:?}");
+                };
+                (os == CURRENT_OS).then(|| BuiltinApp {
+                    id: AppId(id.to_owned()),
+                    category: AppCategory::parse(category)
+                        .unwrap_or_else(|| panic!("неизвестная категория приложения: {row:?}")),
+                    name,
+                    family: (family != "-").then_some(family),
+                })
+            })
+            .collect();
         Lexicon {
             en: lang("en", WORDS_EN, LM_EN),
             ru: lang("ru", WORDS_RU, LM_RU),
             empty: HashSet::new(),
-            excluded_apps: rows(EXCLUDED_APPS)
-                .filter_map(|row| {
-                    let mut cols = row.split('\t');
-                    let os = cols.next()?;
-                    (os == CURRENT_OS).then(|| cols.nth(1)).flatten()
-                })
-                .map(|id| AppId(id.to_owned()))
-                .collect(),
+            excluded_apps: builtin_apps.iter().map(|a| a.id.clone()).collect(),
+            builtin_apps,
         }
     }
 
@@ -157,6 +201,11 @@ impl Lexicon {
     /// менеджеры паролей, удалённые рабочие столы.
     pub fn default_excluded_apps(&self) -> &[AppId] {
         &self.excluded_apps
+    }
+
+    /// Тот же список с названиями, категориями и семействами — для окна настроек.
+    pub fn builtin_apps(&self) -> &[BuiltinApp] {
+        &self.builtin_apps
     }
 }
 

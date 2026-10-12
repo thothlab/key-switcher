@@ -480,12 +480,13 @@ fn short_words(curated: &str) -> Result<String> {
 fn excluded_apps(curated: &str) -> Result<String> {
     let mut out = String::from(
         "# Сгенерировано ks-datagen из tools/ks-datagen/curated/excluded_apps.tsv; не править руками.\n\
-         # Колонки: ОС, категория, идентификатор, сверка (installed — прочитан с установленного .app; unverified — не сверен).\n",
+         # Колонки: ОС, категория, идентификатор, сверка (installed — прочитан с установленного .app; unverified — не сверен),\n\
+         # название в окне настроек, семейство (одна строка окна на несколько приложений; «-» — нет).\n",
     );
     let mut seen = HashSet::new();
     for row in data_rows(curated) {
-        let [os, category, id, check] = row.as_slice() else {
-            bail!("excluded_apps: ожидалось 4 колонки: {row:?}");
+        let [os, category, id, check, name, family] = row.as_slice() else {
+            bail!("excluded_apps: ожидалось 6 колонок: {row:?}");
         };
         ensure!(
             matches!(*os, "macos" | "windows" | "linux"),
@@ -512,8 +513,12 @@ fn excluded_apps(curated: &str) -> Result<String> {
                 "excluded_apps: Windows — exe в нижнем регистре: {id:?}"
             );
         }
+        ensure!(
+            !name.trim().is_empty() && !family.trim().is_empty(),
+            "excluded_apps: у {id:?} нет названия или семейства («-» — нет семейства)"
+        );
         ensure!(seen.insert((*os, *id)), "excluded_apps: повтор {id:?}");
-        writeln!(out, "{os}\t{category}\t{id}\t{check}")?;
+        writeln!(out, "{os}\t{category}\t{id}\t{check}\t{name}\t{family}")?;
     }
     println!("исключённые приложения: {}", seen.len());
     Ok(out)

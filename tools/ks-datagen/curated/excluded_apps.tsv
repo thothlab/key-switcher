@@ -1,84 +1,87 @@
 # Встроенный список приложений, где автоисправление выключено по умолчанию — исходник для data/excluded_apps.tsv.
-# Колонки: ОС, категория, идентификатор, как сверен.
+# Колонки: ОС, категория, идентификатор, как сверен, название в окне настроек, семейство.
 # Категории: terminal — командная строка; ide/editor — код; password — менеджеры паролей; remote — ввод уходит на другую машину.
 # Сверка: installed — CFBundleIdentifier прочитан из установленного .app на машине разработки (macOS 27, 2026-10-11);
 # unverified — общеизвестный идентификатор, на машине не сверен (TODO(prd): сверить на целевой ОС).
 # Windows — имя exe в нижнем регистре; Linux — app_id (Wayland) или WM_CLASS (X11).
-macos	terminal	com.apple.Terminal	installed
-macos	terminal	com.googlecode.iterm2	unverified
-macos	terminal	dev.warp.Warp-Stable	unverified
-macos	terminal	net.kovidgoyal.kitty	unverified
-macos	terminal	org.alacritty	unverified
-macos	terminal	com.github.wez.wezterm	unverified
-macos	terminal	com.mitchellh.ghostty	unverified
-macos	ide	com.apple.dt.Xcode	installed
-macos	ide	com.microsoft.VSCode	installed
-macos	ide	com.todesktop.230313mzl4w4u92	installed
-macos	ide	com.google.android.studio	installed
-macos	ide	com.jetbrains.intellij	unverified
-macos	ide	com.jetbrains.intellij.ce	unverified
-macos	ide	com.jetbrains.pycharm	unverified
-macos	ide	com.jetbrains.pycharm.ce	unverified
-macos	ide	com.jetbrains.WebStorm	unverified
-macos	ide	com.jetbrains.CLion	unverified
-macos	ide	com.jetbrains.goland	unverified
-macos	ide	com.jetbrains.rider	unverified
-macos	ide	com.jetbrains.rustrover	unverified
-macos	editor	com.sublimetext.4	unverified
-macos	editor	dev.zed.Zed	unverified
-macos	password	com.apple.Passwords	installed
-macos	password	com.apple.keychainaccess	unverified
-macos	password	com.1password.1password	unverified
-macos	password	com.bitwarden.desktop	unverified
-macos	password	org.keepassxc.keepassxc	unverified
-macos	remote	com.apple.ScreenSharing	installed
-macos	remote	com.microsoft.rdc.macos	unverified
-windows	terminal	windowsterminal.exe	unverified
-windows	terminal	cmd.exe	unverified
-windows	terminal	powershell.exe	unverified
-windows	terminal	pwsh.exe	unverified
-windows	terminal	conhost.exe	unverified
-windows	terminal	mintty.exe	unverified
-windows	terminal	putty.exe	unverified
-windows	terminal	alacritty.exe	unverified
-windows	terminal	wezterm-gui.exe	unverified
-windows	ide	code.exe	unverified
-windows	ide	cursor.exe	unverified
-windows	ide	devenv.exe	unverified
-windows	ide	idea64.exe	unverified
-windows	ide	pycharm64.exe	unverified
-windows	ide	webstorm64.exe	unverified
-windows	ide	clion64.exe	unverified
-windows	ide	goland64.exe	unverified
-windows	ide	rider64.exe	unverified
-windows	ide	rustrover64.exe	unverified
-windows	ide	studio64.exe	unverified
-windows	editor	sublime_text.exe	unverified
-windows	password	1password.exe	unverified
-windows	password	bitwarden.exe	unverified
-windows	password	keepassxc.exe	unverified
-windows	password	keepass.exe	unverified
-windows	remote	mstsc.exe	unverified
-linux	terminal	org.gnome.Terminal	unverified
-linux	terminal	gnome-terminal-server	unverified
-linux	terminal	org.gnome.Console	unverified
-linux	terminal	org.kde.konsole	unverified
-linux	terminal	kitty	unverified
-linux	terminal	Alacritty	unverified
-linux	terminal	org.wezfurlong.wezterm	unverified
-linux	terminal	com.mitchellh.ghostty	unverified
-linux	terminal	foot	unverified
-linux	terminal	XTerm	unverified
-linux	ide	code	unverified
-linux	ide	code-oss	unverified
-linux	ide	VSCodium	unverified
-linux	ide	jetbrains-idea	unverified
-linux	ide	jetbrains-idea-ce	unverified
-linux	ide	jetbrains-pycharm	unverified
-linux	ide	jetbrains-pycharm-ce	unverified
-linux	ide	jetbrains-studio	unverified
-linux	editor	sublime_text	unverified
-linux	editor	dev.zed.Zed	unverified
-linux	password	1Password	unverified
-linux	password	Bitwarden	unverified
-linux	password	org.keepassxc.KeePassXC	unverified
+# Название — как приложение зовётся в системе (на macOS — по-русски, если система его локализует).
+# Семейство — одна строка окна на несколько приложений (JetBrains); «-» — приложение само по себе.
+# Издания с одним названием (IntelliJ IDEA и IntelliJ IDEA CE) окно тоже показывает одной строкой.
+macos	terminal	com.apple.Terminal	installed	Терминал	-
+macos	terminal	com.googlecode.iterm2	unverified	iTerm2	-
+macos	terminal	dev.warp.Warp-Stable	unverified	Warp	-
+macos	terminal	net.kovidgoyal.kitty	unverified	kitty	-
+macos	terminal	org.alacritty	unverified	Alacritty	-
+macos	terminal	com.github.wez.wezterm	unverified	WezTerm	-
+macos	terminal	com.mitchellh.ghostty	unverified	Ghostty	-
+macos	ide	com.apple.dt.Xcode	installed	Xcode	-
+macos	ide	com.microsoft.VSCode	installed	Visual Studio Code	-
+macos	ide	com.todesktop.230313mzl4w4u92	installed	Cursor	-
+macos	ide	com.google.android.studio	installed	Android Studio	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.intellij	unverified	IntelliJ IDEA	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.intellij.ce	unverified	IntelliJ IDEA	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.pycharm	unverified	PyCharm	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.pycharm.ce	unverified	PyCharm	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.WebStorm	unverified	WebStorm	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.CLion	unverified	CLion	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.goland	unverified	GoLand	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.rider	unverified	Rider	JetBrains IDE и Android Studio
+macos	ide	com.jetbrains.rustrover	unverified	RustRover	JetBrains IDE и Android Studio
+macos	editor	com.sublimetext.4	unverified	Sublime Text	-
+macos	editor	dev.zed.Zed	unverified	Zed	-
+macos	password	com.apple.Passwords	installed	Пароли	-
+macos	password	com.apple.keychainaccess	unverified	Связка ключей	-
+macos	password	com.1password.1password	unverified	1Password	-
+macos	password	com.bitwarden.desktop	unverified	Bitwarden	-
+macos	password	org.keepassxc.keepassxc	unverified	KeePassXC	-
+macos	remote	com.apple.ScreenSharing	installed	Общий экран	-
+macos	remote	com.microsoft.rdc.macos	unverified	Windows App (удалённый рабочий стол)	-
+windows	terminal	windowsterminal.exe	unverified	Windows Terminal	-
+windows	terminal	cmd.exe	unverified	Командная строка	-
+windows	terminal	powershell.exe	unverified	PowerShell	-
+windows	terminal	pwsh.exe	unverified	PowerShell	-
+windows	terminal	conhost.exe	unverified	Консоль Windows	-
+windows	terminal	mintty.exe	unverified	mintty (Git Bash, Cygwin)	-
+windows	terminal	putty.exe	unverified	PuTTY	-
+windows	terminal	alacritty.exe	unverified	Alacritty	-
+windows	terminal	wezterm-gui.exe	unverified	WezTerm	-
+windows	ide	code.exe	unverified	Visual Studio Code	-
+windows	ide	cursor.exe	unverified	Cursor	-
+windows	ide	devenv.exe	unverified	Visual Studio	-
+windows	ide	idea64.exe	unverified	IntelliJ IDEA	JetBrains IDE и Android Studio
+windows	ide	pycharm64.exe	unverified	PyCharm	JetBrains IDE и Android Studio
+windows	ide	webstorm64.exe	unverified	WebStorm	JetBrains IDE и Android Studio
+windows	ide	clion64.exe	unverified	CLion	JetBrains IDE и Android Studio
+windows	ide	goland64.exe	unverified	GoLand	JetBrains IDE и Android Studio
+windows	ide	rider64.exe	unverified	Rider	JetBrains IDE и Android Studio
+windows	ide	rustrover64.exe	unverified	RustRover	JetBrains IDE и Android Studio
+windows	ide	studio64.exe	unverified	Android Studio	JetBrains IDE и Android Studio
+windows	editor	sublime_text.exe	unverified	Sublime Text	-
+windows	password	1password.exe	unverified	1Password	-
+windows	password	bitwarden.exe	unverified	Bitwarden	-
+windows	password	keepassxc.exe	unverified	KeePassXC	-
+windows	password	keepass.exe	unverified	KeePass	-
+windows	remote	mstsc.exe	unverified	Подключение к удалённому рабочему столу	-
+linux	terminal	org.gnome.Terminal	unverified	GNOME Terminal	-
+linux	terminal	gnome-terminal-server	unverified	GNOME Terminal	-
+linux	terminal	org.gnome.Console	unverified	GNOME Console	-
+linux	terminal	org.kde.konsole	unverified	Konsole	-
+linux	terminal	kitty	unverified	kitty	-
+linux	terminal	Alacritty	unverified	Alacritty	-
+linux	terminal	org.wezfurlong.wezterm	unverified	WezTerm	-
+linux	terminal	com.mitchellh.ghostty	unverified	Ghostty	-
+linux	terminal	foot	unverified	foot	-
+linux	terminal	XTerm	unverified	XTerm	-
+linux	ide	code	unverified	Visual Studio Code	-
+linux	ide	code-oss	unverified	Code - OSS	-
+linux	ide	VSCodium	unverified	VSCodium	-
+linux	ide	jetbrains-idea	unverified	IntelliJ IDEA	JetBrains IDE и Android Studio
+linux	ide	jetbrains-idea-ce	unverified	IntelliJ IDEA	JetBrains IDE и Android Studio
+linux	ide	jetbrains-pycharm	unverified	PyCharm	JetBrains IDE и Android Studio
+linux	ide	jetbrains-pycharm-ce	unverified	PyCharm	JetBrains IDE и Android Studio
+linux	ide	jetbrains-studio	unverified	Android Studio	JetBrains IDE и Android Studio
+linux	editor	sublime_text	unverified	Sublime Text	-
+linux	editor	dev.zed.Zed	unverified	Zed	-
+linux	password	1Password	unverified	1Password	-
+linux	password	Bitwarden	unverified	Bitwarden	-
+linux	password	org.keepassxc.KeePassXC	unverified	KeePassXC	-

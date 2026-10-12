@@ -19,5 +19,5 @@ pub use config::{
 };
 pub use engine::Engine;
 pub use key::{KeyDir, KeyEvent, Modifiers, PhysicalKey, ResetReason, UnknownKey};
-pub use ks_data::{AppId, Lang, Lexicon};
+pub use ks_data::{AppCategory, AppId, BuiltinApp, Lang, Lexicon};
 pub use layout::{KeyStroke, LayoutId, LayoutMap, LayoutSet, Level};

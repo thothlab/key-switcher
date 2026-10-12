@@ -92,6 +92,28 @@ fn builtin_excluded_apps_belong_to_the_current_os() {
     }
 }
 
+/// Окно настроек показывает названия, а не идентификаторы: у каждой строки встроенного списка
+/// есть название, JetBrains и Android Studio — одно семейство, список совпадает с вето движка.
+#[test]
+fn builtin_apps_have_names_and_jetbrains_is_one_family() {
+    let lex = Lexicon::embedded();
+    let apps = lex.builtin_apps();
+    let ids: Vec<AppId> = apps.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(ids, lex.default_excluded_apps());
+    assert!(apps.iter().all(|a| !a.name.is_empty() && a.name != a.id.0));
+    let studio = if cfg!(target_os = "macos") {
+        "com.google.android.studio"
+    } else if cfg!(windows) {
+        "studio64.exe"
+    } else {
+        "jetbrains-studio"
+    };
+    let family = |id: &str| apps.iter().find(|a| a.id.0 == id).and_then(|a| a.family);
+    assert_eq!(family(studio), Some("JetBrains IDE и Android Studio"));
+    let jetbrains = apps.iter().filter(|a| a.family == family(studio)).count();
+    assert!(jetbrains >= 5, "семейство JetBrains: {jetbrains}");
+}
+
 /// Слабые формы (задача 11): редкая форма ослаблена, частые коллизии истории 12 — нет.
 #[test]
 fn weak_forms_cover_rare_forms_but_not_protected_collisions() {
