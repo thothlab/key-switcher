@@ -14,7 +14,8 @@
 | `KS_SIGN_IDENTITY="KeySwitcher Local" sh scripts/macos/build-app.sh` | Собрать и подписать `dist/KeySwitcher.app`; после — `pkill -f "KeySwitcher.app/Contents/MacOS/keyswitcher"; open dist/KeySwitcher.app` |
 | `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --status` | Состояние работающего агента: права, перехват, раскладки, приложение в фокусе |
 | `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --selftest` | 18 живых сценариев в собственном документе TextEdit (нужны права TCC; при чужом фокусе отказывается) |
-| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --settings` | Окно настроек |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --settings` | Окно настроек; `--section hotkeys` (general, apps, words, permissions, about) — сразу на разделе |
+| `KS_SETTINGS_SHOT=/tmp/s.bmp target/debug/keyswitcher --settings --section apps` | Только отладочная сборка: окно снимает свой кадр в BMP и закрывается (`KS_SETTINGS_SIZE=640x420` — размер); `sips -s format png` — в PNG |
 | `sh scripts/windows/build.sh` / `sh scripts/linux/build.sh` | Кросс-сборка `dist/windows/keyswitcher.exe` (mingw-w64) и `dist/linux/keyswitcher` (zig + cargo-zigbuild) |
 | `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания; `--write docs/eval.md` обновляет отчёт |
 | `cargo run --release -p ks-datagen` | Перегенерировать `data/` из hunspell (сеть; Tatoeba только с `--resample-eval`) |
@@ -43,6 +44,7 @@ docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
 - Ядро не знает ОС: время только из `KeyEvent.time_ms`, раскладки — `LayoutMap`, построенные бэкендом из ОС (`UCKeyTranslate`, `ToUnicodeEx`, xkbcommon), не зашитые.
 - Решение на границе слова (`detect::decide`): вето (безопасный ввод, исключённое приложение через `AppRules::excludes`, `words.never`, вид токена, пароль) → CaseFix → словарное вето (кроме слабых форм `data/weak_forms.tsv`) → короткие слова по спискам и контексту → LM. Однобуквенное слово перед исправленным словом исправляется вместе с ним.
 - Отмена: ⇧⇧/Pause, ⌘Z/Ctrl+Z (на отпускании модификатора) и Punto-аккорд ⌘⌥⇧; отменённое слово не исправляется снова до перезапуска (память только в процессе).
+- Встроенный список приложений без автоисправления — `tools/ks-datagen/curated/excluded_apps.tsv` (ОС, категория, id, сверка, название, семейство); `data/excluded_apps.tsv` из него генерируется. Окно показывает названия, семейство (JetBrains и Android Studio) — одной строкой; в конфиге исключения остаются по id.
 - Настройки — `~/Library/Application Support/KeySwitcher/config.toml` (Windows `%APPDATA%\KeySwitcher`, Linux `~/.config/keyswitcher`); агент следит за файлом и применяет на лету, окно настроек пишет тот же файл. Битый файл не перезаписывается.
 - Умолчания хоткеев: macOS — как Punto Switcher (`undo_or_convert_selection = ["Meta+Alt+Shift"]`, `switch_layout = ["Meta+Space"]`, одиночный Shift выключен); Windows/Linux — `HotkeyConfig::classic` (⇧⇧, Pause, Shift+Pause, оба Shift). `--selftest` всегда гоняется на `classic`.
 
@@ -64,6 +66,8 @@ docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
 - После выдачи прав агента надо перезапустить: TCC применяет их только к новому процессу.
 - Автокапитализация macOS делает заглавной первую букву документа — самопроверка поэтому печатает после префикса «x ».
 - `.githooks/prepare-commit-msg` (через `core.hooksPath`) вырезает строки `Co-Authored-By` из сообщений коммитов.
+- У терминала этой машины нет прав «Запись экрана» и «Универсальный доступ»: `screencapture` и синтетические щелчки и нажатия из shell не работают. Вид окна настроек — через `KS_SETTINGS_SHOT`, щелчки и запись сочетаний в окне проверяет пользователь.
+- ⌘Пробел и ⌃Пробел macOS забирает раньше окна (Spotlight, смена источника ввода): окно предлагает их готовыми в списке «…», а не записывает нажатием. В своём окне (`com.keyswitcher.app`) агент пропускает все нажатия — `OWN_APP_IDS` в `ks-app/src/handler.rs`.
 
 ## Инициативы и PRD
 
