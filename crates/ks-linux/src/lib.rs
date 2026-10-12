@@ -1,70 +1,38 @@
-//! Бэкенд Linux — заготовка. Перехват, эмуляцию ввода и таблицы раскладок из API ОС
-//! добавляет задача этого бэкенда; до тех пор всё, что зовётся при старте, возвращает `Err`.
+//! Бэкенд Linux: чтение клавиатур и мыши через evdev без захвата, ввод через виртуальную
+//! клавиатуру uinput — одинаково для X11 и Wayland; смена раскладки в X11 (XKB), KDE Plasma
+//! (D-Bus), Sway и Hyprland (IPC); таблицы раскладок из xkbcommon; трей StatusNotifierItem
+//! (`ksni`) без GTK; автозапуск через XDG autostart.
+//!
+//! Чистая логика (коды клавиш, окружение, команды IPC, раскладки, поправки модели исполнения
+//! без захвата, права, автозапуск) — в модулях верхнего уровня и проверяется на любой ОС;
+//! системная часть `sys` собирается только под Linux.
 
-use std::sync::Arc;
+/// Имя своей виртуальной клавиатуры uinput: по нему она исключается из чтения и из списков
+/// клавиатур окружения.
+pub const VIRTUAL_KEYBOARD: &str = "KeySwitcher virtual keyboard";
 
-use ks_core::{Action, AppId, LayoutId, LayoutSet};
-use ks_platform::{
-    Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
-};
+pub mod autostart;
+pub mod desktop;
+pub mod guard;
+pub mod ipc;
+pub mod json;
+pub mod keymap;
+pub mod layouts;
+pub mod nograb;
+pub mod perms;
+pub mod selection;
+pub mod switch;
+pub mod tap;
+pub mod tray;
+pub mod typing;
+pub mod vkbd;
 
-const NOT_YET: &str = "бэкенд Linux ещё не реализован";
+#[cfg(target_os = "linux")]
+mod sys;
+#[cfg(target_os = "linux")]
+pub use sys::{LinuxBackend, LinuxTray};
 
-#[derive(Debug, Default)]
-pub struct LinuxBackend;
-
-impl LinuxBackend {
-    pub fn new() -> LinuxBackend {
-        LinuxBackend
-    }
-}
-
-impl Backend for LinuxBackend {
-    fn start(&self, _handler: Arc<dyn KeyHandler>) -> Result<(), BackendError> {
-        log::warn!("{NOT_YET}");
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn execute(&self, _action: &Action) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn layouts(&self) -> LayoutSet {
-        LayoutSet::default()
-    }
-
-    fn current_layout(&self) -> LayoutId {
-        LayoutId::default()
-    }
-
-    fn focused_app(&self) -> (AppId, String) {
-        (AppId::default(), String::new())
-    }
-
-    fn secure_input(&self) -> bool {
-        false
-    }
-
-    fn permissions(&self) -> Vec<PermissionStatus> {
-        Vec::new()
-    }
-
-    fn request_permission(&self, _kind: PermissionKind) {}
-
-    fn open_permission_settings(&self, _kind: PermissionKind) {}
-
-    fn set_autostart(&self, _on: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(NOT_YET.to_owned()))
-    }
-
-    fn autostart(&self) -> bool {
-        false
-    }
-
-    fn health(&self) -> BackendHealth {
-        BackendHealth {
-            detail: NOT_YET.to_owned(),
-            ..BackendHealth::default()
-        }
-    }
-}
+#[cfg(not(target_os = "linux"))]
+mod stub;
+#[cfg(not(target_os = "linux"))]
+pub use stub::LinuxBackend;

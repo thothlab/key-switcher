@@ -14,7 +14,8 @@ log.workspace = true
 evdev.workspace = true
 x11rb.workspace = true
 zbus.workspace = true
-ksni.workspace = true
+# blocking: трей поднимается из обычного потока агента, без своего async-рантайма.
+ksni = { workspace = true, features = ["blocking"] }
 xkbcommon-dl.workspace = true
 
 [lints]

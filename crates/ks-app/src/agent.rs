@@ -462,15 +462,77 @@ pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
     })
 }
 
-/// Linux: трей даёт `ks-linux` (задача Linux-бэкенда); пока агент без иконки.
+/// Linux: трей StatusNotifierItem из `ks-linux` (`ksni`, без GTK). Нет хоста трея или шины
+/// D-Bus — агент работает без значка, состояние видно в `--status`.
 #[cfg(target_os = "linux")]
 pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
+
+    use ks_platform::TrayHost;
+
     let agent = Arc::new(Agent::new(backend));
     agent.serve()?;
     agent.start();
+    let tray = match ks_linux::LinuxTray::new(Box::new(linux_tray_view)) {
+        Ok(tray) => Some(tray),
+        Err(e) => {
+            log::error!("значок в трее не создан: {e}");
+            None
+        }
+    };
+    let commands = tray.as_ref().map(TrayHost::commands);
+    let mut next_refresh = Instant::now();
     while !agent.quit_requested() {
-        let _ = agent.refresh();
-        std::thread::sleep(REFRESH);
+        if Instant::now() >= next_refresh {
+            let model = agent.refresh();
+            if let Some(tray) = &tray {
+                tray.update(&model);
+            }
+            next_refresh = Instant::now() + REFRESH;
+        }
+        let wait = next_refresh.saturating_duration_since(Instant::now());
+        match commands.as_ref().map(|rx| rx.recv_timeout(wait)) {
+            Some(Ok(cmd)) => {
+                if agent.command(&cmd) == Flow::Quit {
+                    break;
+                }
+                next_refresh = Instant::now();
+            }
+            Some(Err(RecvTimeoutError::Timeout)) => {}
+            Some(Err(RecvTimeoutError::Disconnected)) | None => std::thread::sleep(wait),
+        }
+    }
+    if let Some(path) = paths::agent_socket() {
+        let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+/// Меню и подсказка трея Linux — из тех же `status::tooltip` и `status::menu_entries`, что у
+/// macOS и Windows.
+#[cfg(target_os = "linux")]
+fn linux_tray_view(model: &TrayModel) -> ks_linux::tray::TrayView {
+    use ks_linux::tray::{TrayEntry, TrayView};
+
+    use crate::status::{MenuEntry, menu_entries, tooltip};
+
+    TrayView {
+        tooltip: tooltip(model.status),
+        entries: menu_entries(model)
+            .into_iter()
+            .map(|entry| match entry {
+                MenuEntry::Separator => TrayEntry::Separator,
+                MenuEntry::Item {
+                    label,
+                    command,
+                    checked,
+                } => TrayEntry::Item {
+                    label,
+                    command,
+                    checked,
+                },
+            })
+            .collect(),
+    }
 }
