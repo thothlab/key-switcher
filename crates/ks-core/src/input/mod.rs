@@ -8,11 +8,13 @@
 //!
 //! Часов в ядре нет: время — только `KeyEvent.time_ms` и `Engine::tick(now_ms)`.
 
+use std::collections::VecDeque;
+
 use crate::buffer::TokenBuffer;
 use crate::detect::convert_keys;
 use crate::{
     Action, AppId, Config, Context, Disposition, Hotkey, KeyDir, KeyEvent, KeyStroke, Lang,
-    LayoutId, LayoutMap, LayoutSet, Level, Modifiers, PhysicalKey, ReplaceKind, ResetReason,
+    LayoutId, LayoutMap, LayoutSet, Level, Modifiers, Os, PhysicalKey, ReplaceKind, ResetReason,
     WordRules,
 };
 
@@ -22,12 +24,16 @@ pub(crate) const T_TAP_MS: u64 = 300;
 pub(crate) const T_DOUBLE_MS: u64 = 400;
 /// Слова короче в список «никогда» не берутся: иначе ломаются короткие слова.
 const NEVER_MIN_CHARS: usize = 3;
+/// Память сеанса держит столько последних отменённых слов; старые вытесняются.
+const UNDONE_MAX: usize = 64;
 
 /// Состояние движка, которое модуль читает.
 pub(crate) struct View<'a> {
     pub(crate) config: &'a Config,
     pub(crate) layouts: &'a LayoutSet,
     pub(crate) buffer: &'a TokenBuffer,
+    /// Чьё стандартное «отменить» слушать.
+    pub(crate) os: Os,
 }
 
 /// Ответ модуля на событие.
@@ -68,8 +74,6 @@ struct Pending {
     up_ms: u64,
     /// Другая раскладка пары относительно той, что была при касании.
     target: Option<LayoutId>,
-    /// После касания был клик или сброс: двойного уже не будет.
-    broken: bool,
 }
 
 /// Модификаторы, нажатые вместе: для хоткеев только из модификаторов (⌥⇧).
@@ -104,6 +108,14 @@ pub(crate) struct InputState {
     pending: Option<Pending>,
     finished: Option<Finished>,
     last_undone: Option<String>,
+    /// Набранные формы (без хвостовых знаков) последних `UNDONE_MAX` токенов, исправление
+    /// которых отменено в этом сеансе: автоматика их больше не трогает. Только память
+    /// процесса — не `Config`, не диск, не логи; сбросы и `set_config` её не чистят, новый
+    /// `Engine` начинает с пустой.
+    undone: VecDeque<String>,
+    /// ⌘Z/Ctrl+Z нажат в окне отмены: отмена ждёт отпускания Cmd/Ctrl, чтобы стирание не
+    /// стало Ctrl+Backspace / Cmd+Backspace. Пока ждёт, автоповтор Z глотается.
+    queued_undo: Option<Finished>,
 }
 
 impl InputState {
@@ -114,6 +126,9 @@ impl InputState {
         }
         if self.finished.as_ref().is_some_and(|f| f.app != ctx.app) {
             self.finished = None;
+        }
+        if self.queued_undo.as_ref().is_some_and(|f| f.app != ctx.app) {
+            self.queued_undo = None;
         }
         let is_shift = matches!(ev.key, PhysicalKey::ShiftLeft | PhysicalKey::ShiftRight);
         match (ev.dir, is_shift) {
@@ -144,17 +159,17 @@ impl InputState {
 
     /// Клик, смена фокуса, безопасный ввод: слово забыто, Shift с кликом — не касание.
     /// Отпускания модификаторов могли уйти мимо движка (поле пароля, отключённый перехват),
-    /// поэтому нажатые модификаторы забываются; ожидающий одиночный Shift ещё сработает,
-    /// но двойного с ним уже не будет.
+    /// поэтому нажатые модификаторы забываются. Ожидающий одиночный Shift снимается вместе
+    /// со сроком: Shift с кликом раскладку не переключает. Ждущая отмена тоже снимается:
+    /// каретка могла уйти.
     pub(crate) fn on_reset(&mut self, _why: ResetReason) {
         self.finished = None;
+        self.queued_undo = None;
         self.held = 0;
         self.chord = None;
         self.tap = None;
         self.both = false;
-        if let Some(pending) = &mut self.pending {
-            pending.broken = true;
-        }
+        self.pending = None;
     }
 
     /// Раскладки сменились: записанные нажатия больше не читаются.
@@ -164,6 +179,27 @@ impl InputState {
 
     pub(crate) fn last_undone(&self) -> Option<&str> {
         self.last_undone.as_deref()
+    }
+
+    /// Токен отменён в этом сеансе: без учёта регистра и хвостовых знаков с обеих сторон
+    /// (отменённое «ИИ,» защищает и «ИИ»).
+    pub(crate) fn was_undone(&self, keys: &[(PhysicalKey, Level)], from: &LayoutMap) -> bool {
+        !self.undone.is_empty()
+            && typed_form(keys, from).is_some_and(|typed| {
+                let core = word_core(&typed);
+                self.undone.iter().any(|w| same_word(w, core))
+            })
+    }
+
+    /// Запомнить отменённый токен; повтор поднимается в самые свежие, сверх `UNDONE_MAX`
+    /// вытесняется самый старый.
+    fn remember_undone(&mut self, typed: &str) {
+        let core = word_core(typed);
+        self.undone.retain(|w| !same_word(w, core));
+        self.undone.push_back(core.to_owned());
+        if self.undone.len() > UNDONE_MAX {
+            self.undone.pop_front();
+        }
     }
 
     /// Граница слова пройдена: запомнить слово (и исправление, если было) для ⇧⇧ и Pause.
@@ -226,14 +262,7 @@ impl InputState {
             self.tap = None;
             return;
         }
-        let second = match &self.pending {
-            Some(pending) if !pending.broken => true,
-            Some(_) => {
-                self.flush(view.config, step);
-                false
-            }
-            None => false,
-        };
+        let second = self.pending.is_some();
         self.tap = Some(Tap {
             key: ev.key,
             down_ms: ev.time_ms,
@@ -268,7 +297,6 @@ impl InputState {
         self.pending = Some(Pending {
             up_ms: ev.time_ms,
             target: switch_target(view.layouts, &ctx.layout).cloned(),
-            broken: false,
         });
         if find_command(view.config, |h| *h == Hotkey::DoubleShift).is_none() {
             // двойной Shift ни на что не назначен — ждать нечего
@@ -289,6 +317,9 @@ impl InputState {
                 }
             }
         }
+        if self.standard_undo(ev, view, step) {
+            return;
+        }
         let command = if ev.key.is_modifier() {
             None
         } else {
@@ -297,8 +328,9 @@ impl InputState {
                     if *key == ev.key && same_mods(*mods, ev.mods))
             })
         };
-        if command != Some(Command::UndoOrConvertWord) {
-            // первое нажатие, отличное от Shift, закрывает окно отмены и забывает слово
+        if command != Some(Command::UndoOrConvertWord) && !is_undo_modifier(ev.key, view.os) {
+            // первое нажатие, отличное от Shift, закрывает окно отмены и забывает слово;
+            // Cmd/Ctrl стандартного «отменить» — нет, иначе ⌘Z/Ctrl+Z до окна не доживёт
             self.finished = None;
         }
         if let Some(command) = command {
@@ -309,9 +341,44 @@ impl InputState {
         }
     }
 
+    /// Стандартное «отменить» ОС в открытом окне отмены — та же отмена, что ⇧⇧: нажатие и
+    /// его автоповтор в приложение не уходят, а сама отмена ждёт отпускания Cmd/Ctrl
+    /// (`other_up`). Вне окна — `false`: сочетание идёт в приложение и сбрасывает слово как
+    /// обычно. Не переназначается и от `Config.hotkeys` не зависит.
+    fn standard_undo(&mut self, ev: &KeyEvent, view: &View, step: &mut Step) -> bool {
+        let combo = ev.key == PhysicalKey::KeyZ && same_mods(ev.mods, undo_mods(view.os));
+        if self.queued_undo.is_some() && !ev.key.is_modifier() {
+            if combo && ev.repeat {
+                step.consumed = Some(Disposition::Swallow);
+                return true;
+            }
+            // другая клавиша или новое нажатие Z: текст мог измениться — отмена не уходит
+            self.queued_undo = None;
+        }
+        if !combo || ev.repeat {
+            return false;
+        }
+        let Some(word) = self.finished.take_if(|f| f.corrected.is_some()) else {
+            return false;
+        };
+        step.consumed = Some(Disposition::Swallow);
+        self.queued_undo = Some(word);
+        true
+    }
+
     fn other_up(&mut self, ev: &KeyEvent, view: &View, step: &mut Step) {
-        if let Some(peak) = mod_bit(ev.key).and_then(|bit| self.release_modifier(bit)) {
+        let Some(bit) = mod_bit(ev.key) else {
+            return;
+        };
+        if let Some(peak) = self.release_modifier(bit) {
             self.fire_chord(peak, view, step);
+        }
+        if is_undo_modifier(ev.key, view.os) && self.held & undo_bits(view.os) == 0 {
+            // Cmd/Ctrl отпущен: ждущая отмена уходит, без Z окно отмены закрывается
+            match self.queued_undo.take() {
+                Some(word) => self.undo(word, view.layouts, step),
+                None => self.finished = None,
+            }
         }
     }
 
@@ -405,12 +472,7 @@ impl InputState {
         let (Some(erase), Some(from)) = (word.corrected, layouts.get(&word.layout)) else {
             return;
         };
-        let typed: Option<String> = word
-            .keys
-            .iter()
-            .map(|&(key, level)| from.char_for(key, level))
-            .collect();
-        let Some(typed) = typed else {
+        let Some(typed) = typed_form(&word.keys, from) else {
             return;
         };
         let mut keys: Vec<KeyStroke> = word
@@ -424,6 +486,7 @@ impl InputState {
         keys.push(word.boundary.0);
         let mut text = typed.clone();
         text.push(word.boundary.1);
+        self.remember_undone(&typed);
         self.last_undone = Some(typed);
         step.actions.push(Action::Replace {
             erase,
@@ -481,6 +544,38 @@ fn same_mods(a: Modifiers, b: Modifiers) -> bool {
     a.shift == b.shift && a.alt == b.alt && a.ctrl == b.ctrl && a.meta == b.meta
 }
 
+/// Стандартное «отменить»: ⌘Z на macOS, Ctrl+Z на Windows и Linux.
+fn undo_mods(os: Os) -> Modifiers {
+    match os {
+        Os::MacOs => Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        },
+        Os::Windows | Os::Linux => Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        },
+    }
+}
+
+/// Биты (`mod_bit`) модификатора стандартного «отменить» этой ОС, обеих сторон.
+fn undo_bits(os: Os) -> u8 {
+    match os {
+        Os::MacOs => 0b1100_0000,
+        Os::Windows | Os::Linux => 0b0000_1100,
+    }
+}
+
+/// Модификатор стандартного «отменить» этой ОС: его нажатие окно отмены не закрывает.
+fn is_undo_modifier(key: PhysicalKey, os: Os) -> bool {
+    match os {
+        Os::MacOs => matches!(key, PhysicalKey::MetaLeft | PhysicalKey::MetaRight),
+        Os::Windows | Os::Linux => {
+            matches!(key, PhysicalKey::ControlLeft | PhysicalKey::ControlRight)
+        }
+    }
+}
+
 const SHIFTS: u8 = 0b0000_0011;
 
 fn mod_bit(key: PhysicalKey) -> Option<u8> {
@@ -529,12 +624,7 @@ impl WordRules {
 
     /// Набранный токен есть в списке: без учёта регистра, хвостовые знаки можно не писать.
     pub fn contains(&self, typed: &str) -> bool {
-        let core = typed.trim_end_matches(|c: char| !ks_data::is_word_char(c));
-        self.never
-            .iter()
-            .map(|w| w.trim())
-            .filter(|w| !w.is_empty())
-            .any(|w| same_word(w, typed) || same_word(w, core))
+        listed(&self.never, typed)
     }
 
     /// Добавить токен явным действием пользователя; `false` — не принят или уже есть.
@@ -546,6 +636,29 @@ impl WordRules {
         self.never.push(word.to_owned());
         true
     }
+}
+
+/// Слово без хвостовых знаков («ИИ,» → «ИИ»); токен из одних знаков — целиком.
+fn word_core(typed: &str) -> &str {
+    let core = typed.trim_end_matches(|c: char| !ks_data::is_word_char(c));
+    if core.is_empty() { typed } else { core }
+}
+
+/// Набранная форма: символы нажатий в раскладке, где их набрали.
+fn typed_form(keys: &[(PhysicalKey, Level)], from: &LayoutMap) -> Option<String> {
+    keys.iter()
+        .map(|&(key, level)| from.char_for(key, level))
+        .collect()
+}
+
+/// Токен есть в списке слов: без учёта регистра, хвостовые знаки можно не писать.
+fn listed(words: &[String], typed: &str) -> bool {
+    let core = typed.trim_end_matches(|c: char| !ks_data::is_word_char(c));
+    words
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty())
+        .any(|w| same_word(w, typed) || same_word(w, core))
 }
 
 fn same_word(a: &str, b: &str) -> bool {

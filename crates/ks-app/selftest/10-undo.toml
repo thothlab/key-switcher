@@ -1,0 +1,27 @@
+# Сценарии задачи 10 (manual-control/spec.md): отменённое слово не исправляется снова в этом
+# сеансе (история 18c) и отмена стандартным ⌘Z (история 18b). Перед каждым --selftest агент
+# начинает новый сеанс движка (Agent::fresh_engine), но память отменённых слов живёт весь
+# прогон: слово, отменённое здесь, не годится для сценариев, которые идут позже и ждут его
+# исправления. Поэтому у каждого сценария своё слово: «cgfcb,j» → «спасибо» и «ckjdj» →
+# «слово» (их исправление проверяют сценарии 05 и 02); «ghbdtn» отменяет сценарий 06.
+
+[[scenario]]
+name = "Слово сеанса исправляется, пока его не отменили"
+layout_before = "en"
+input = ["KeyC", "KeyG", "KeyF", "KeyC", "KeyB", "Comma", "KeyJ", "Space"]
+expect_text = "спасибо "
+expect_layout = "ru"
+
+[[scenario]]
+name = "Отменённое слово при повторном наборе не исправляется"
+layout_before = "en"
+input = ["KeyC", "KeyG", "KeyF", "KeyC", "KeyB", "Comma", "KeyJ", "Space", "wait:300", "ShiftLeft", "ShiftLeft", "wait:300", "KeyC", "KeyG", "KeyF", "KeyC", "KeyB", "Comma", "KeyJ", "Space"]
+expect_text = "cgfcb,j cgfcb,j "
+expect_layout = "en"
+
+[[scenario]]
+name = "Отмена исправления стандартным ⌘Z"
+layout_before = "en"
+input = ["KeyC", "KeyK", "KeyJ", "KeyD", "KeyJ", "Space", "wait:300", "Meta+KeyZ"]
+expect_text = "ckjdj "
+expect_layout = "en"

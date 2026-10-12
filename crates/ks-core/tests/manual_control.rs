@@ -113,8 +113,12 @@ fn double_shift_right_after_correction_undoes_it() {
         "двойной Shift не переключает ещё раз"
     );
 
-    // без «Не исправлять» ничего не запомнено: то же слово снова исправляется
-    corrected_ghbdtn(&mut e, &us, &ru);
+    // отменённое слово до перезапуска не исправляется (G03); навсегда — только «Не исправлять»
+    let c = ctx(&us);
+    type_text(&mut e, &c, &us, "ghbdtn");
+    assert_eq!(space(&mut e, &c), Outcome::pass());
+    let mut fresh = engine(vec![us.clone(), ru.clone()]);
+    corrected_ghbdtn(&mut fresh, &us, &ru);
 }
 
 #[test]
@@ -461,4 +465,19 @@ fn shift_release_lost_behind_secure_input_does_not_count_as_both_shifts() {
     let tap = shift_tap(&mut e, &c, K::ShiftRight, 5_000);
     assert_eq!(actions(&tap), vec![]);
     assert_eq!(e.tick(LATER), vec![Action::SwitchLayout(ru.id.clone())]);
+}
+
+#[test]
+fn click_after_single_shift_cancels_the_pending_switch() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine(vec![us.clone(), ru]);
+    let c = ctx(&us);
+    shift_tap(&mut e, &c, K::ShiftLeft, 1_000);
+    assert!(
+        e.next_deadline().is_some(),
+        "предусловие: одиночный Shift ждёт второго"
+    );
+    e.on_reset(ResetReason::MouseClick);
+    assert_eq!(e.next_deadline(), None);
+    assert_eq!(e.tick(LATER), vec![], "Shift с кликом не переключает");
 }

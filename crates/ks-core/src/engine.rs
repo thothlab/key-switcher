@@ -7,8 +7,8 @@ use crate::detect::{self, Decision, Segment};
 use crate::input::{InputState, View};
 use crate::{
     Action, Config, Context, Disposition, EngineStatus, KeyDir, KeyEvent, KeyStroke, Lang,
-    LayoutId, LayoutMap, LayoutSet, Level, Lexicon, Modifiers, Outcome, PhysicalKey, ReplaceKind,
-    ResetReason,
+    LayoutId, LayoutMap, LayoutSet, Level, Lexicon, Modifiers, Os, Outcome, PhysicalKey,
+    ReplaceKind, ResetReason,
 };
 
 /// Движок: нажатия и контекст на вход, действия на выход. Как действия исполняются, не знает.
@@ -20,6 +20,10 @@ pub struct Engine {
     input: InputState,
     /// Язык последних решённых слов: переживает границу, умирает при сбросе буфера.
     segment: Segment,
+    /// Раскладка, в которой печаталось прошлое событие; `None` — после сброса контекста.
+    layout: Option<LayoutId>,
+    /// ОС, чьё стандартное «отменить» (⌘Z или Ctrl+Z) отменяет автоисправление.
+    os: Os,
 }
 
 impl Engine {
@@ -31,7 +35,16 @@ impl Engine {
             buffer: TokenBuffer::default(),
             input: InputState::default(),
             segment: Segment::default(),
+            layout: None,
+            os: Os::current(),
         }
+    }
+
+    /// Чьё стандартное «отменить» слушать: macOS — ⌘Z, Windows и Linux — Ctrl+Z.
+    /// По умолчанию — ОС сборки (`Os::current()`); другая нужна тестам и разбору чужой ОС.
+    pub fn with_os(mut self, os: Os) -> Engine {
+        self.os = os;
+        self
     }
 
     /// Граница слова (пробел, Enter) при исправлении проглатывается и входит в `Replace`.
@@ -40,13 +53,16 @@ impl Engine {
     pub fn on_key(&mut self, ev: &KeyEvent, ctx: &Context) -> Outcome {
         if self.buffer.note_app(&ctx.app) {
             self.segment.reset();
+            self.layout = None;
         }
         let view = View {
             config: &self.config,
             layouts: &self.layouts,
             buffer: &self.buffer,
+            os: self.os,
         };
         let step = self.input.on_key(ev, ctx, &view);
+        self.note_layout(&ctx.layout);
         if let Some(layout) = step.relayout {
             self.buffer.relayout(layout);
         }
@@ -208,6 +224,25 @@ impl Engine {
     fn forget(&mut self) {
         self.buffer.clear();
         self.segment.reset();
+        self.layout = None;
+    }
+
+    /// Раскладку сменили руками — одиночным Shift, сочетанием ОС, из меню (видно по
+    /// `Context.layout`): контекст сегмента переходит на язык новой раскладки, чтобы
+    /// «Slack», ⇧, «мы» не стало «vs». Свои переключения (исправление, отмена, ручная
+    /// конвертация) ведут туда же, куда сегмент уже поставлен решением или отменой.
+    fn note_layout(&mut self, layout: &LayoutId) {
+        if self.layout.as_ref() == Some(layout) {
+            return;
+        }
+        if self.layout.replace(layout.clone()).is_none() {
+            // первое событие после сброса: сравнивать не с чем, контекст уже пуст
+            return;
+        }
+        match self.layouts.get(layout).map(|map| map.lang) {
+            Some(lang @ (Lang::En | Lang::Ru)) => self.segment.set(lang),
+            _ => self.segment.reset(),
+        }
     }
 
     /// Решение на границе слова (`detect`); исправление — `Replace` с проглоченной границей.
@@ -226,6 +261,10 @@ impl Engine {
             Lang::Ru => en,
             Lang::Other => return Outcome::pass(),
         };
+        // отменённое в этом сеансе — как слово из `words.never`: не трогать, сегмент не менять
+        if self.input.was_undone(self.buffer.keys(), from) {
+            return Outcome::pass();
+        }
         let decision = detect::decide(&detect::Input {
             keys: self.buffer.keys(),
             from,
