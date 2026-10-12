@@ -34,6 +34,12 @@ held_out_eval_words = 10241
 held_out_outside_hunspell = 655
 held_out_leaks = 0
 
+[weak_forms]
+source = "tools/ks-datagen/curated/weak_forms.tsv"
+rule = "форма не защищена словарным вето, если образ — словарное слово другого языка и проходит θ_dict"
+ru = 2
+en = 1
+
 [eval]
 source = "https://downloads.tatoeba.org/exports/per_language"
 license = "CC BY 2.0 FR"

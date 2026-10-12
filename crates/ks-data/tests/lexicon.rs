@@ -69,15 +69,43 @@ fn short_word_lists_hold_frequent_words_only() {
     assert!(lex.short_words(Lang::Other, 1).is_empty());
 }
 
+/// Ревью 07: встроенный список — только приложения текущей ОС, чужие id в него не попадают.
 #[test]
-fn terminals_of_every_os_are_excluded_by_default() {
+fn builtin_excluded_apps_belong_to_the_current_os() {
     let lex = Lexicon::embedded();
     let apps = lex.default_excluded_apps();
-    for id in [
-        "com.apple.Terminal",
-        "windowsterminal.exe",
-        "org.gnome.Terminal",
-    ] {
-        assert!(apps.contains(&AppId(id.to_owned())), "{id}");
+    let terminals = [
+        ("macos", "com.apple.Terminal"),
+        ("windows", "windowsterminal.exe"),
+        ("linux", "org.gnome.Terminal"),
+    ];
+    let current = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    };
+    for (os, id) in terminals {
+        let listed = apps.contains(&AppId(id.to_owned()));
+        assert_eq!(listed, os == current, "{os}: {id}");
     }
+}
+
+/// Слабые формы (задача 11): редкая форма ослаблена, частые коллизии истории 12 — нет.
+#[test]
+fn weak_forms_cover_rare_forms_but_not_protected_collisions() {
+    let lex = Lexicon::embedded();
+    assert!(lex.is_weak(Lang::Ru, "еру"));
+    assert!(lex.is_weak(Lang::En, "dbl"));
+    for word in ["руку", "рук", "руки", "луны", "ешь", "еще", "ещё", "муки"]
+    {
+        assert!(lex.contains(Lang::Ru, word), "{word}");
+        assert!(!lex.is_weak(Lang::Ru, word), "{word}");
+    }
+    for word in ["here", "her", "herb", "keys", "tim", "the"] {
+        assert!(!lex.is_weak(Lang::En, word), "{word}");
+    }
+    assert!(!lex.is_weak(Lang::En, "еру"));
+    assert!(!lex.is_weak(Lang::Other, "еру"));
 }

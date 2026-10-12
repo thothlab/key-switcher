@@ -1,7 +1,9 @@
 //! Правило решения на границе слова (PRD «Решение на границе слова», `analysis/detection.md` §8):
 //! жёсткие вето → кандидат в двух трактовках краевых знаков → словарное вето → короткие слова
 //! по спискам и контексту → оценка LM с порогами → серая полоса (оставить, есть ⇧⇧).
-//! Отдельно — случайные две заглавные («ПРивет» → «Привет»).
+//! Отдельно — случайные две заглавные («ПРивет» → «Привет»). Слабая словарная форма из
+//! курируемого списка ([`Lexicon::is_weak`], «еру» = «the») словарным вето не защищена: её
+//! исправляет только словарный кандидат цели, прошедший `θ_dict` с контекстом сегмента.
 //!
 //! На вход — нажатия слова, пара раскладок, контекст, настройки и словари ([`Input`]), на выход —
 //! [`Decision`]. Между словами живёт только язык сегмента ([`Segment`]).
@@ -138,13 +140,12 @@ pub(crate) fn decide(input: &Input) -> Decision {
     let word_lower = lower(&token.typed[word.clone()]);
     let letters = letters(&token.typed[word.clone()]);
     // 3. Настоящее слово своего языка не трогается (here ↔ руку); «ПРивет» — только регистр.
-    if letters > SHORT_MAX && lexicon.contains(from.lang, &word_lower) {
-        return match case_fix(&token, word, from) {
-            Some(fix) => Decision::Fix(fix),
-            None => Decision::Keep {
-                lang: Some(from.lang),
-            },
-        };
+    // Слабая форма («еру» = «the») остаётся настоящим словом, только если словарный
+    // кандидат цели не прошёл порог.
+    let real = letters > SHORT_MAX && lexicon.contains(from.lang, &word_lower);
+    let weak = real && lexicon.is_weak(from.lang, &word_lower);
+    if real && !weak {
+        return keep_real(&token, word, from);
     }
     // Набранное в трактовке «знак» — короткое слово своего языка с обычной пунктуацией по
     // краям: `it.` — это «it» с точкой, а не «шею»; `to§` — не «to».
@@ -173,9 +174,21 @@ pub(crate) fn decide(input: &Input) -> Decision {
         }
     }
     match best {
-        Some((_, reading)) => Decision::Fix(reading.into_fix(&token, to)),
-        None => Decision::Keep {
+        // слабую форму исправляет только словарный кандидат (ранг 2), не LM-путь
+        Some((rank, reading)) if !weak || rank == 2 => Decision::Fix(reading.into_fix(&token, to)),
+        _ if real => keep_real(&token, word, from),
+        _ => Decision::Keep {
             lang: known_short.then_some(from.lang),
+        },
+    }
+}
+
+/// Настоящее слово своего языка: оставить, исправив разве что две заглавные.
+fn keep_real(token: &Token, word: Range<usize>, from: &LayoutMap) -> Decision {
+    match case_fix(token, word, from) {
+        Some(fix) => Decision::Fix(fix),
+        None => Decision::Keep {
+            lang: Some(from.lang),
         },
     }
 }

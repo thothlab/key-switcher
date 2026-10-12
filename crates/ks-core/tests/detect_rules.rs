@@ -105,6 +105,38 @@ fn collision_pairs_are_kept_in_both_directions() {
     }
 }
 
+/// Задача 11: «еру» есть в ru_RU (имя буквы «ер»), но это «the» в русской раскладке. Редкая
+/// форма из курируемого списка не защищает слово от исправления; частые пары — по-прежнему.
+#[test]
+fn rare_dictionary_form_does_not_shield_a_frequent_word() {
+    let (us, ru, mut e) = us_pc();
+    let (in_us, in_ru) = (ctx(&us), ctx(&ru));
+    type_text(&mut e, &in_ru, &ru, "еру");
+    let out = space(&mut e, &in_ru);
+    assert_eq!(fixed_text(&out).as_deref(), Some("the "));
+    // как в сценарии «Английская фраза в русской раскладке»: дальше — английская раскладка
+    let target = out.actions.iter().find_map(|a| match a {
+        Action::Replace { target_layout, .. } => target_layout.clone(),
+        _ => None,
+    });
+    assert_eq!(target, Some(us.id.clone()));
+    e.on_reset(ResetReason::External);
+    assert_eq!(word(&mut e, &in_ru, &ru, "Еру").as_deref(), Some("The "));
+    e.on_reset(ResetReason::External);
+    assert_eq!(word(&mut e, &in_us, &us, "here"), None);
+    e.on_reset(ResetReason::External);
+    assert_eq!(word(&mut e, &in_ru, &ru, "руку"), None);
+}
+
+/// Обычная форма частого слова в список не входит: «туче» («туча») остаётся настоящим словом и
+/// в начале фразы, без контекста, хотя её образ «next» — словарное слово.
+#[test]
+fn ordinary_form_of_a_common_word_is_still_protected() {
+    let (_, ru, mut e) = us_pc();
+    let in_ru = ctx(&ru);
+    assert_eq!(word(&mut e, &in_ru, &ru, "туче"), None);
+}
+
 // --- Токены, не похожие на прозу ---------------------------------------------------------------
 
 #[test]
@@ -263,8 +295,16 @@ fn password_like_strings_are_never_corrected() {
 #[test]
 fn excluded_apps_follow_the_builtin_list_and_user_rules() {
     let (us, ru) = (us(), ru_pc());
+    // встроенный список — только для текущей ОС (ревью 07)
+    let terminal_id = if cfg!(target_os = "macos") {
+        "com.apple.Terminal"
+    } else if cfg!(windows) {
+        "windowsterminal.exe"
+    } else {
+        "org.gnome.Terminal"
+    };
     let terminal = Context {
-        app: AppId("com.apple.Terminal".to_owned()),
+        app: AppId(terminal_id.to_owned()),
         ..ctx(&us)
     };
     let mut e = engine(vec![us.clone(), ru.clone()]);

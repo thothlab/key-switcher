@@ -9,7 +9,10 @@
 //!   квант, размер алфавита со служебными символами (0 — граница, 1 — символ вне алфавита),
 //!   длина алфавита в байтах (`u16` LE), алфавит UTF-8, плотная таблица квантованных `−ln P`;
 //! - `short_words.tsv` — `язык\tслово`;
-//! - `excluded_apps.tsv` — `ОС\tкатегория\tидентификатор\tсверка`.
+//! - `excluded_apps.tsv` — `ОС\tкатегория\tидентификатор\tсверка`; встраиваются все ОС,
+//!   в [`Lexicon`] остаются строки текущей;
+//! - `weak_forms.tsv` — `язык\tформа\tобраз`: редкие словарные формы, которые не защищены
+//!   словарным вето (курируемый список, обоснования — в `tools/ks-datagen/curated/weak_forms.tsv`).
 //!
 //! Здесь же живут `Lang` и `AppId`: их реэкспортирует `ks-core`, который зависит от этого крейта.
 
@@ -46,12 +49,24 @@ const LM_EN: &[u8] = include_bytes!("../../../data/lm_en.bin.gz");
 const LM_RU: &[u8] = include_bytes!("../../../data/lm_ru.bin.gz");
 const SHORT_WORDS: &str = include_str!("../../../data/short_words.tsv");
 const EXCLUDED_APPS: &str = include_str!("../../../data/excluded_apps.tsv");
+const WEAK_FORMS: &str = include_str!("../../../data/weak_forms.tsv");
+
+/// Код ОС сборки — первая колонка `excluded_apps.tsv`; та же цепочка, что `Os::current()` в ядре.
+const CURRENT_OS: &str = if cfg!(target_os = "macos") {
+    "macos"
+} else if cfg!(windows) {
+    "windows"
+} else {
+    "linux"
+};
 
 struct LangData {
     words: fst::Set<Vec<u8>>,
     lm: CharLm,
     /// Короткие слова длины 1 и 2.
     short: [HashSet<String>; 2],
+    /// Слабые словарные формы (нижний регистр, `ё→е`).
+    weak: HashSet<String>,
 }
 
 pub struct Lexicon {
@@ -75,13 +90,22 @@ impl Lexicon {
             lm: CharLm::decode(&gunzip(lm, code))
                 .unwrap_or_else(|| panic!("встроенная LM {code} повреждена")),
             short: short_words(code),
+            weak: rows(WEAK_FORMS)
+                .filter_map(|row| row.strip_prefix(code)?.strip_prefix('\t'))
+                .filter_map(|rest| rest.split('\t').next())
+                .map(|form| normalize(form).into_owned())
+                .collect(),
         };
         Lexicon {
             en: lang("en", WORDS_EN, LM_EN),
             ru: lang("ru", WORDS_RU, LM_RU),
             empty: HashSet::new(),
             excluded_apps: rows(EXCLUDED_APPS)
-                .filter_map(|row| row.split('\t').nth(2))
+                .filter_map(|row| {
+                    let mut cols = row.split('\t');
+                    let os = cols.next()?;
+                    (os == CURRENT_OS).then(|| cols.nth(1)).flatten()
+                })
                 .map(|id| AppId(id.to_owned()))
                 .collect(),
         }
@@ -121,7 +145,15 @@ impl Lexicon {
         }
     }
 
-    /// Встроенный список исключённых приложений всех ОС: терминалы, IDE и редакторы кода,
+    /// Слабая словарная форма: есть в словаре языка, но сама редкая, а её образ в другой
+    /// раскладке — частое слово («еру» = «the»). Словарное вето такую форму не защищает;
+    /// `ё` и `е` не различаются.
+    pub fn is_weak(&self, lang: Lang, word_lower: &str) -> bool {
+        self.data(lang)
+            .is_some_and(|d| d.weak.contains(normalize(word_lower).as_ref()))
+    }
+
+    /// Встроенный список исключённых приложений текущей ОС: терминалы, IDE и редакторы кода,
     /// менеджеры паролей, удалённые рабочие столы.
     pub fn default_excluded_apps(&self) -> &[AppId] {
         &self.excluded_apps

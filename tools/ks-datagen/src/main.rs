@@ -102,6 +102,8 @@ fn main() -> Result<()> {
         manifest,
         "\n[hunspell]\nsource = \"https://github.com/LibreOffice/dictionaries\"\ncommit = \"{LO_COMMIT}\""
     )?;
+    // Словоформы обоих языков — для аудита курируемых списков после цикла.
+    let mut forms: HashMap<Lang, BTreeSet<String>> = HashMap::new();
     for (lang, dir, name) in [(Lang::Ru, "ru_RU", "ru_RU"), (Lang::En, "en", "en_US")] {
         let url = |file: &str| format!("{LO_RAW}/{LO_COMMIT}/{dir}/{file}");
         let aff = fetch_text(&lo_cache, &url(&format!("{name}.aff")), refresh)?;
@@ -166,13 +168,28 @@ fn main() -> Result<()> {
             eval_tokens.len(),
             code = lang.code(),
         )?;
+        forms.insert(lang, expansion.forms);
     }
 
     let short = short_words(&fs::read_to_string(curated.join("short_words.tsv"))?)?;
     fs::write(data.join("short_words.tsv"), short)?;
     let apps = excluded_apps(&fs::read_to_string(curated.join("excluded_apps.tsv"))?)?;
     fs::write(data.join("excluded_apps.tsv"), apps)?;
-    let adversarial = adversarial(&fs::read_to_string(curated.join("adversarial.tsv"))?)?;
+    let adversarial_src = fs::read_to_string(curated.join("adversarial.tsv"))?;
+    let (weak, weak_ru, weak_en) = weak_forms(
+        &fs::read_to_string(curated.join("weak_forms.tsv"))?,
+        &forms,
+        &adversarial_src,
+        &Tables::fixtures(),
+    )?;
+    fs::write(data.join("weak_forms.tsv"), weak)?;
+    writeln!(
+        manifest,
+        "\n[weak_forms]\nsource = \"tools/ks-datagen/curated/weak_forms.tsv\"\n\
+         rule = \"форма не защищена словарным вето, если образ — словарное слово другого языка и проходит θ_dict\"\n\
+         ru = {weak_ru}\nen = {weak_en}"
+    )?;
+    let adversarial = adversarial(&adversarial_src)?;
     fs::write(data.join("eval/adversarial.tsv"), adversarial)?;
 
     writeln!(
@@ -502,6 +519,173 @@ fn excluded_apps(curated: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Таблицы раскладок пары (базовый уровень, код W3C → символ) — фикстуры задачи 01, по ним же
+/// меряет `ks-eval`: US и все три русские (macOS «Русская», «Русская – ПК», Windows KBDRU).
+struct Tables {
+    us: HashMap<String, char>,
+    ru: Vec<(&'static str, HashMap<String, char>)>,
+}
+
+impl Tables {
+    fn fixtures() -> Tables {
+        Tables {
+            us: base_table(include_str!(
+                "../../../crates/ks-core/tests/fixtures/us.tsv"
+            )),
+            ru: vec![
+                (
+                    "ru_apple",
+                    base_table(include_str!(
+                        "../../../crates/ks-core/tests/fixtures/ru_apple.tsv"
+                    )),
+                ),
+                (
+                    "ru_pc",
+                    base_table(include_str!(
+                        "../../../crates/ks-core/tests/fixtures/ru_pc.tsv"
+                    )),
+                ),
+                (
+                    "ru_win",
+                    base_table(include_str!(
+                        "../../../crates/ks-core/tests/fixtures/ru_win.tsv"
+                    )),
+                ),
+            ],
+        }
+    }
+}
+
+/// Строки фикстуры `код\tBase\t…` без комментариев и `@`-полей.
+fn base_table(text: &str) -> HashMap<String, char> {
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with('@'))
+        .filter_map(|l| {
+            let mut cols = l.split('\t');
+            let key = cols.next()?;
+            let mut base = cols.next()?.chars();
+            let c = base.next()?;
+            base.next().is_none().then(|| (key.to_owned(), c))
+        })
+        .collect()
+}
+
+/// Те же клавиши базового уровня в другой таблице; `None`, если символа нет.
+fn keyed_image(
+    word: &str,
+    from: &HashMap<String, char>,
+    to: &HashMap<String, char>,
+) -> Option<String> {
+    word.chars()
+        .map(|c| {
+            let key = from.iter().find(|(_, v)| **v == c)?.0;
+            to.get(key).copied()
+        })
+        .collect()
+}
+
+/// Срез `adversarial.tsv` с защищёнными коллизиями (PRD история 12).
+const COLLISION_SLICE: &str = "коллизии";
+
+/// Токены защищённого среза. Пустой набор — ошибка: иначе проверка коллизий молча проходит.
+fn protected_collisions(adversarial: &str) -> Result<HashSet<&str>> {
+    let mut set = HashSet::new();
+    for row in data_rows(adversarial) {
+        let [slice, _lang, token] = row.as_slice() else {
+            bail!("adversarial: ожидалось 3 колонки: {row:?}");
+        };
+        if *slice == COLLISION_SLICE {
+            set.insert(*token);
+        }
+    }
+    ensure!(
+        !set.is_empty(),
+        "weak_forms: в adversarial.tsv нет среза «{COLLISION_SLICE}» — защищённые коллизии не проверить"
+    );
+    Ok(set)
+}
+
+/// Аудит слабых форм: форма — словарное слово своего языка от трёх букв, образ — те же клавиши
+/// в другой раскладке, один и тот же во всех трёх русских таблицах, и словарное слово другого
+/// языка; ни форма, ни образ не стоят в защищённом срезе «коллизии» (`adversarial.tsv`, PRD
+/// история 12) и не ослабляются в обе стороны; частота промаха на tune и причина указаны.
+/// Возвращает файл и число форм RU и EN.
+fn weak_forms(
+    curated: &str,
+    forms: &HashMap<Lang, BTreeSet<String>>,
+    adversarial: &str,
+    tables: &Tables,
+) -> Result<(String, usize, usize)> {
+    let protected = protected_collisions(adversarial)?;
+    let mut out = String::from(
+        "# Сгенерировано ks-datagen из tools/ks-datagen/curated/weak_forms.tsv; не править руками.\n\
+         # Колонки: язык, форма, образ в другой раскладке. Словарное вето форму не защищает;\n\
+         # обоснование каждой строки (промахи на tune, почему форма редкая) — в исходнике.\n",
+    );
+    let mut rows: Vec<(Lang, String, String)> = Vec::new();
+    for row in data_rows(curated) {
+        let [lang, form, pair, misses, why] = row.as_slice() else {
+            bail!("weak_forms: ожидалось 5 колонок: {row:?}");
+        };
+        let lang = Lang::parse(lang)?;
+        let other = match lang {
+            Lang::Ru => Lang::En,
+            Lang::En => Lang::Ru,
+        };
+        ensure!(
+            form.chars().count() >= 3 && form.chars().all(|c| lang.is_letter(c)),
+            "weak_forms: {form:?} — не слово от трёх букв языка"
+        );
+        ensure!(
+            forms.get(&lang).is_some_and(|f| f.contains(*form)),
+            "weak_forms: {form:?} нет в словаре — вето его и так не защищает"
+        );
+        // образ привязан к паре только если не зависит от русской раскладки
+        for (name, ru) in &tables.ru {
+            let image = match lang {
+                Lang::Ru => keyed_image(form, ru, &tables.us),
+                Lang::En => keyed_image(form, &tables.us, ru),
+            };
+            ensure!(
+                image.as_deref() == Some(*pair),
+                "weak_forms: образ {form:?} в {name} — {image:?}, а не {pair:?}: зависит от раскладки"
+            );
+        }
+        ensure!(
+            forms.get(&other).is_some_and(|f| f.contains(*pair)),
+            "weak_forms: образ {pair:?} нет в словаре другого языка"
+        );
+        ensure!(
+            !protected.contains(form) && !protected.contains(pair),
+            "weak_forms: {form:?}↔{pair:?} — защищённая коллизия (adversarial.tsv)"
+        );
+        ensure!(
+            misses.parse::<u32>().is_ok_and(|n| n > 0),
+            "weak_forms: у {form:?} нет частоты промаха на tune"
+        );
+        ensure!(!why.trim().is_empty(), "weak_forms: у {form:?} нет причины");
+        ensure!(
+            !rows.iter().any(|(l, f, _)| *l == lang && f == form),
+            "weak_forms: повтор {form:?}"
+        );
+        rows.push((lang, (*form).to_owned(), (*pair).to_owned()));
+    }
+    for (lang, form, pair) in &rows {
+        ensure!(
+            !rows.iter().any(|(l, f, _)| l != lang && f == pair),
+            "weak_forms: {form:?}↔{pair:?} ослаблены в обе стороны"
+        );
+        writeln!(out, "{}\t{form}\t{pair}", lang.code())?;
+    }
+    let count = |lang: Lang| rows.iter().filter(|(l, ..)| *l == lang).count();
+    println!(
+        "слабые формы: ru {}, en {}",
+        count(Lang::Ru),
+        count(Lang::En)
+    );
+    Ok((out, count(Lang::Ru), count(Lang::En)))
+}
+
 fn adversarial(curated: &str) -> Result<String> {
     let mut out = String::from(
         "# Сгенерировано ks-datagen из tools/ks-datagen/curated/adversarial.tsv; составлено вручную.\n\
@@ -623,4 +807,79 @@ fn sample_tatoeba(
         picked: picked.len(),
         export: export.trim().to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tables() -> Tables {
+        let us = "KeyT\tt\nKeyH\th\nKeyE\te\nKeyR\tr\n";
+        let ru = "KeyT\tе\nKeyH\tр\nKeyE\tу\nKeyR\tк\n";
+        Tables {
+            us: base_table(us),
+            ru: vec![
+                ("a", base_table(ru)),
+                ("b", base_table(ru)),
+                ("c", base_table(ru)),
+            ],
+        }
+    }
+
+    fn forms() -> HashMap<Lang, BTreeSet<String>> {
+        let set = |w: &[&str]| w.iter().map(|s| (*s).to_owned()).collect();
+        HashMap::from([
+            (Lang::Ru, set(&["еру", "руку"])),
+            (Lang::En, set(&["the", "here"])),
+        ])
+    }
+
+    const ADVERSARIAL: &str = "коллизии\tru\tруку\nколлизии\ten\there\n";
+
+    #[test]
+    fn rare_form_with_a_fixed_image_passes() {
+        let (out, ru, en) = weak_forms(
+            "ru\tеру\tthe\t2455\tимя буквы\n",
+            &forms(),
+            ADVERSARIAL,
+            &tables(),
+        )
+        .unwrap();
+        assert!(out.contains("ru\tеру\tthe\n"));
+        assert_eq!((ru, en), (1, 0));
+    }
+
+    #[test]
+    fn protected_collision_is_rejected() {
+        let err = weak_forms(
+            "ru\tруку\there\t158\tчастая\n",
+            &forms(),
+            ADVERSARIAL,
+            &tables(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("защищённая коллизия"), "{err}");
+    }
+
+    #[test]
+    fn missing_collision_slice_fails_instead_of_passing_silently() {
+        for adversarial in ["", "коллизия\tru\tруку\n", "код\ten\tfoo_bar\n"] {
+            let err =
+                weak_forms("ru\tеру\tthe\t1\tx\n", &forms(), adversarial, &tables()).unwrap_err();
+            assert!(
+                err.to_string().contains("нет среза"),
+                "{adversarial:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_dependent_image_is_rejected() {
+        // в таблице «c» буква «у» на KeyR, а не на KeyE: образ «еру» там — «thr», а не «the»
+        let mut t = tables();
+        t.ru[2].1.remove("KeyE");
+        t.ru[2].1.insert("KeyR".into(), 'у');
+        let err = weak_forms("ru\tеру\tthe\t1\tx\n", &forms(), ADVERSARIAL, &t).unwrap_err();
+        assert!(err.to_string().contains("зависит от раскладки"), "{err}");
+    }
 }
