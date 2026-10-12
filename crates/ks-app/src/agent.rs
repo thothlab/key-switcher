@@ -203,10 +203,10 @@ impl Agent {
     /// не дошло, не затирается), правка ложится поверх, результат пишется. Битый файл не
     /// трогается — правка остаётся в памяти.
     fn edit_and_save(&self, change: impl FnOnce(&EngineHandler) -> bool) {
-        if let Some(path) = &self.config_path
-            && let Ok(config) = Config::load(path)
-        {
-            self.apply_loaded(Ok(config));
+        // ошибка разбора тоже проходит через `apply_loaded`: тогда `save` увидит ошибку и
+        // не перезапишет файл, который пользователь правил руками и ещё не дописал
+        if let Some(path) = &self.config_path {
+            self.apply_loaded(Config::load(path));
         }
         if change(&self.handler) {
             self.save();

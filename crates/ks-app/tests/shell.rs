@@ -488,6 +488,21 @@ fn menu_command_keeps_an_external_edit_not_yet_reloaded() {
     assert_eq!(saved.apps.disabled, [AppId(TEXTEDIT.into())]);
 }
 
+/// Файл испортили руками, а агент ещё не успел это перечитать: команда меню не должна
+/// записать поверх него последние рабочие настройки.
+#[test]
+fn menu_command_never_rewrites_a_file_broken_since_the_last_reload() {
+    let (a, path) = agent("broken-edit", FakeBackend::new(true), None);
+    let broken = "version = 1\n[words\nnever = [\"rjvg\"\n";
+    std::fs::write(&path, broken).unwrap();
+    a.command(&TrayCommand::ToggleApp(AppId(TEXTEDIT.into())));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        broken,
+        "битый файл перезаписан"
+    );
+}
+
 /// Окно настроек KeySwitcher: набор в его полях и запись сочетания агент не трогает.
 #[test]
 fn own_settings_window_is_never_corrected() {
