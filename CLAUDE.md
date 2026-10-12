@@ -19,6 +19,7 @@
 | `sh scripts/windows/build.sh` / `sh scripts/linux/build.sh` | Кросс-сборка `dist/windows/keyswitcher.exe` (mingw-w64) и `dist/linux/keyswitcher` (zig + cargo-zigbuild) |
 | `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания; `--write docs/eval.md` обновляет отчёт |
 | `cargo run --release -p ks-datagen` | Перегенерировать `data/` из hunspell (сеть; Tatoeba только с `--resample-eval`) |
+| `git tag vX.Y.Z && git push ssh://git@ssh.github.com:443/thothlab/key-switcher.git vX.Y.Z` | Релиз: CI (`.github/workflows/release.yml`) собирает `.dmg`/`.zip`/`.tar.gz` и публикует предварительный релиз; тег = `version` из `Cargo.toml`. Без тега — `gh workflow run release.yml` (только артефакты) |
 
 ## Каталоги
 
@@ -35,6 +36,7 @@ crates/ks-eval       замер качества на Tatoeba (data/eval/, ча�
 tools/ks-datagen     генератор data/ из hunspell LibreOffice
 data/                сгенерированные словари и модели (коммитятся), лицензии — data/licenses/, THIRD_PARTY.md
 scripts/             сборка .app и локальный сертификат (macos), build.sh (windows, linux), udev-правило (linux)
+packaging/           заметки к релизу и README внутри .dmg/.zip/.tar.gz (CI берёт их отсюда)
 docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
 ```
 
@@ -67,6 +69,8 @@ docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
 - Автокапитализация macOS делает заглавной первую букву документа — самопроверка поэтому печатает после префикса «x ».
 - `.githooks/prepare-commit-msg` (через `core.hooksPath`) вырезает строки `Co-Authored-By` из сообщений коммитов.
 - У терминала этой машины нет прав «Запись экрана» и «Универсальный доступ»: `screencapture` и синтетические щелчки и нажатия из shell не работают. Вид окна настроек — через `KS_SETTINGS_SHOT`, щелчки и запись сочетаний в окне проверяет пользователь.
+- Токен `gh` без права `workflow`: файлы `.github/workflows/` по HTTPS не пушатся, порт 22 закрыт — пушить через `ssh://git@ssh.github.com:443/thothlab/key-switcher.git`.
+- Релизный `.dmg` подписан ad-hoc (Developer ID нет): у пользователя Gatekeeper просит «Всё равно открыть», а права TCC после каждого обновления выдаются заново. Тексты установки — `packaging/`.
 - ⌘Пробел и ⌃Пробел macOS забирает раньше окна (Spotlight, смена источника ввода): окно предлагает их готовыми в списке «…», а не записывает нажатием. В своём окне (`com.keyswitcher.app`) агент пропускает все нажатия — `OWN_APP_IDS` в `ks-app/src/handler.rs`.
 
 ## Инициативы и PRD
