@@ -84,6 +84,15 @@ pub trait Backend: Send + Sync {
     fn set_autostart(&self, on: bool) -> Result<(), BackendError>;
     fn autostart(&self) -> bool;
     fn health(&self) -> BackendHealth;
+    /// Запущенные приложения с окнами (идентификатор, имя) для выбора исключения в окне
+    /// настроек; пусто — ОС их не перечисляет, идентификатор вводится руками.
+    fn running_apps(&self) -> Vec<(AppId, String)> {
+        Vec::new()
+    }
+    /// Имя установленного приложения по идентификатору; `None` — не найдено.
+    fn app_name(&self, _app: &AppId) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

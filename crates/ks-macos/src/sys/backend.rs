@@ -23,8 +23,10 @@ use ks_platform::{
     Backend, BackendError, BackendHealth, KeyHandler, PermissionKind, PermissionStatus,
 };
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSWorkspace, NSWorkspaceDidActivateApplicationNotification};
-use objc2_foundation::NSNotification;
+use objc2_app_kit::{
+    NSApplicationActivationPolicy, NSWorkspace, NSWorkspaceDidActivateApplicationNotification,
+};
+use objc2_foundation::{NSBundle, NSFileManager, NSNotification, NSString};
 
 use super::clipboard::MacClipboard;
 use super::post::CgPoster;
@@ -83,6 +85,48 @@ fn frontmost(_mtm: MainThreadMarker) -> (AppId, String) {
                 (AppId(id.unwrap_or_default()), name.unwrap_or_default())
             })
             .unwrap_or_default()
+    })
+}
+
+/// Приложения с окнами и Dock (обычная политика активации), кроме самого KeySwitcher, по имени
+/// без учёта регистра.
+fn running(_mtm: MainThreadMarker) -> Vec<(AppId, String)> {
+    autoreleasepool(|_| {
+        let own = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|s| s.to_string());
+        let mut apps: Vec<(AppId, String)> = NSWorkspace::sharedWorkspace()
+            .runningApplications()
+            .iter()
+            .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+            .filter_map(|app| {
+                let id = app.bundleIdentifier()?.to_string();
+                if own.as_deref() == Some(id.as_str()) {
+                    return None;
+                }
+                let name = app
+                    .localizedName()
+                    .map_or_else(|| id.clone(), |s| s.to_string());
+                Some((AppId(id), name))
+            })
+            .collect();
+        apps.sort_by_key(|(id, name)| (name.to_lowercase(), id.clone()));
+        apps.dedup_by(|a, b| a.0 == b.0);
+        apps
+    })
+}
+
+/// Имя установленного приложения, как его показывает Finder («Терминал»), без «.app».
+fn installed_name(app: &AppId) -> Option<String> {
+    autoreleasepool(|_| {
+        let url = NSWorkspace::sharedWorkspace()
+            .URLForApplicationWithBundleIdentifier(&NSString::from_str(&app.0))?;
+        let path = url.path()?;
+        let shown = NSFileManager::defaultManager()
+            .displayNameAtPath(&path)
+            .to_string();
+        let name = shown.strip_suffix(".app").unwrap_or(&shown).trim();
+        (!name.is_empty()).then(|| name.to_owned())
     })
 }
 
@@ -370,6 +414,14 @@ impl Backend for MacBackend {
         let app = on_main(frontmost);
         self.state.set_app(app.clone());
         app
+    }
+
+    fn running_apps(&self) -> Vec<(AppId, String)> {
+        on_main(running)
+    }
+
+    fn app_name(&self, app: &AppId) -> Option<String> {
+        on_main(|_mtm| installed_name(app))
     }
 
     fn secure_input(&self) -> bool {
