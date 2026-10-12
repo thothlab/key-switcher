@@ -24,6 +24,18 @@ pub struct Engine {
     layout: Option<LayoutId>,
     /// ОС, чьё стандартное «отменить» (⌘Z или Ctrl+Z) отменяет автоисправление.
     os: Os,
+    /// Слово из одной буквы, оставленное как набрано, — до решения о следующем слове: если
+    /// то исправляется в ту же сторону, буква идёт вместе с ним («B gjkexftncz» →
+    /// «И получается»). Без контекста одна буква сама по себе не исправляется.
+    lone: Option<Lone>,
+}
+
+/// Однобуквенное слово перед текущим: нажатие, раскладка, приложение.
+#[derive(Debug)]
+struct Lone {
+    keys: Vec<(PhysicalKey, Level)>,
+    layout: LayoutId,
+    app: crate::AppId,
 }
 
 impl Engine {
@@ -37,6 +49,7 @@ impl Engine {
             segment: Segment::default(),
             layout: None,
             os: Os::current(),
+            lone: None,
         }
     }
 
@@ -54,6 +67,7 @@ impl Engine {
         if self.buffer.note_app(&ctx.app) {
             self.segment.reset();
             self.layout = None;
+            self.lone = None;
         }
         let view = View {
             config: &self.config,
@@ -185,13 +199,27 @@ impl Engine {
         }
         match ev.key {
             PhysicalKey::Space | PhysicalKey::Enter => {
-                let outcome = self.decide(ev.key, ev.mods, ctx);
-                self.input
-                    .word_done(&self.buffer, ev, &ctx.app, &outcome.actions);
+                let (outcome, prefix) = self.decide(ev.key, ev.mods, ctx);
+                self.input.word_done(
+                    &self.buffer,
+                    ev,
+                    &ctx.app,
+                    &outcome.actions,
+                    prefix.map(|lone| lone.keys),
+                );
+                self.lone = if ev.key == PhysicalKey::Space && outcome.actions.is_empty() {
+                    self.lone_word(ctx)
+                } else {
+                    None
+                };
                 self.buffer.clear();
                 outcome
             }
             PhysicalKey::Backspace => {
+                if self.buffer.is_empty() {
+                    // стирается пробел после прошлого слова — буква больше не «перед» словом
+                    self.lone = None;
+                }
                 self.buffer.erase_back();
                 Outcome::pass()
             }
@@ -231,6 +259,25 @@ impl Engine {
         self.buffer.clear();
         self.segment.reset();
         self.layout = None;
+        self.lone = None;
+    }
+
+    /// Слово в буфере — одна буква, набранная без правок: запомнить до следующего слова.
+    fn lone_word(&self, ctx: &Context) -> Option<Lone> {
+        let keys = self.buffer.keys();
+        let layout = self.buffer.layout()?;
+        let map = self.layouts.get(layout)?;
+        let [(key, level)] = keys else {
+            return None;
+        };
+        if self.buffer.is_edited() || !map.char_for(*key, *level)?.is_alphabetic() {
+            return None;
+        }
+        Some(Lone {
+            keys: keys.to_vec(),
+            layout: layout.clone(),
+            app: ctx.app.clone(),
+        })
     }
 
     /// Раскладку сменили руками — одиночным Shift, сочетанием ОС, из меню (видно по
@@ -252,24 +299,30 @@ impl Engine {
     }
 
     /// Решение на границе слова (`detect`); исправление — `Replace` с проглоченной границей.
-    fn decide(&mut self, boundary: PhysicalKey, mods: Modifiers, ctx: &Context) -> Outcome {
+    fn decide(
+        &mut self,
+        boundary: PhysicalKey,
+        mods: Modifiers,
+        ctx: &Context,
+    ) -> (Outcome, Option<Lone>) {
+        let lone = self.lone.take();
         if !self.config.autocorrect || self.buffer.is_empty() {
-            return Outcome::pass();
+            return (Outcome::pass(), None);
         }
         let Some((en, ru)) = self.layouts.pair() else {
-            return Outcome::pass();
+            return (Outcome::pass(), None);
         };
         let Some(from) = self.buffer.layout().and_then(|id| self.layouts.get(id)) else {
-            return Outcome::pass();
+            return (Outcome::pass(), None);
         };
         let to = match from.lang {
             Lang::En => ru,
             Lang::Ru => en,
-            Lang::Other => return Outcome::pass(),
+            Lang::Other => return (Outcome::pass(), None),
         };
         // отменённое в этом сеансе — как слово из `words.never`: не трогать, сегмент не менять
         if self.input.was_undone(self.buffer.keys(), from) {
-            return Outcome::pass();
+            return (Outcome::pass(), None);
         }
         let decision = detect::decide(&detect::Input {
             keys: self.buffer.keys(),
@@ -283,28 +336,60 @@ impl Engine {
         });
         self.segment.note(&decision);
         let Decision::Fix(fix) = decision else {
-            return Outcome::pass();
+            return (Outcome::pass(), None);
         };
-        let mut keys = fix.strokes;
+        let (mut keys, mut text, mut erase) = (fix.strokes, fix.text, self.buffer.keys().len());
+        // одна буква перед словом, набранная в той же неверной раскладке, — союз или
+        // предлог языка цели («B» → «И»): исправляется вместе со словом
+        let joined = lone.filter(|lone| {
+            fix.kind == ReplaceKind::Auto
+                && lone.app == ctx.app
+                && Some(&lone.layout) == self.buffer.layout()
+        });
+        let letter = joined
+            .as_ref()
+            .and_then(|lone| detect::convert_keys(&lone.keys, from, to))
+            .filter(|letter| {
+                let lower = letter.converted.to_lowercase();
+                self.lexicon.short_words(to.lang, 1).contains(&lower)
+            });
+        let joined = match (joined, letter) {
+            (Some(lone), Some(letter)) => {
+                let space = KeyStroke {
+                    key: PhysicalKey::Space,
+                    shift: false,
+                };
+                keys = letter
+                    .strokes
+                    .into_iter()
+                    .chain([space])
+                    .chain(keys)
+                    .collect();
+                text = format!("{} {text}", letter.converted);
+                erase += lone.keys.len() + 1;
+                Some(lone)
+            }
+            _ => None,
+        };
         keys.push(KeyStroke {
             key: boundary,
             shift: mods.shift,
         });
-        let mut text = fix.text;
         text.push(if boundary == PhysicalKey::Enter {
             '\n'
         } else {
             ' '
         });
-        Outcome {
+        let outcome = Outcome {
             disposition: Disposition::Swallow,
             actions: vec![Action::Replace {
-                erase: self.buffer.keys().len(),
+                erase,
                 keys,
                 text,
                 target_layout: fix.target,
                 kind: fix.kind,
             }],
-        }
+        };
+        (outcome, joined)
     }
 }

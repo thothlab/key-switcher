@@ -180,11 +180,18 @@ fn one_letter_word_without_context_is_kept() {
     let (us, _, mut e) = us_pc();
     let c = ctx(&us);
     assert_eq!(word(&mut e, &c, &us, "z"), None);
+    // следующее исправленное слово забирает букву с собой: «z ghbdtn» → «я привет»
+    assert_eq!(
+        word(&mut e, &c, &us, "ghbdtn").as_deref(),
+        Some("я привет ")
+    );
     // контекст умирает вместе с буфером: Tab, клик
-    assert_eq!(word(&mut e, &c, &us, "ghbdtn").as_deref(), Some("привет "));
     press(&mut e, &c, K::Tab, Modifiers::default());
     assert_eq!(word(&mut e, &c, &us, "z"), None);
-    assert_eq!(word(&mut e, &c, &us, "ghbdtn").as_deref(), Some("привет "));
+    assert_eq!(
+        word(&mut e, &c, &us, "ghbdtn").as_deref(),
+        Some("я привет ")
+    );
     e.on_reset(ResetReason::MouseClick);
     assert_eq!(word(&mut e, &c, &us, "z"), None);
 }

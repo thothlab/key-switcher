@@ -102,6 +102,9 @@ struct Finished {
     boundary: (KeyStroke, char),
     /// Автоисправление напечатало столько символов вместе с границей — окно отмены открыто.
     corrected: Option<usize>,
+    /// Однобуквенное слово перед этим, исправленное вместе с ним («B» → «И»): отмена
+    /// возвращает и его, с пробелом между ними.
+    prefix: Option<Vec<(PhysicalKey, Level)>>,
 }
 
 #[derive(Debug, Default)]
@@ -219,6 +222,7 @@ impl InputState {
         ev: &KeyEvent,
         app: &AppId,
         actions: &[Action],
+        prefix: Option<Vec<(PhysicalKey, Level)>>,
     ) {
         self.finished = None;
         let Some(layout) = buffer.layout() else {
@@ -244,6 +248,7 @@ impl InputState {
             layout: layout.clone(),
             app: app.clone(),
             boundary: (boundary, ' '),
+            prefix: prefix.filter(|_| corrected.is_some()),
             corrected,
         });
     }
@@ -525,16 +530,30 @@ impl InputState {
         let Some(typed) = typed_form(&word.keys, from) else {
             return;
         };
-        let mut keys: Vec<KeyStroke> = word
-            .keys
-            .iter()
-            .map(|&(key, level)| KeyStroke {
-                key,
-                shift: level.is_shift(),
-            })
-            .collect();
+        let strokes = |keys: &[(PhysicalKey, Level)]| {
+            keys.iter()
+                .map(|&(key, level)| KeyStroke {
+                    key,
+                    shift: level.is_shift(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let (mut keys, mut text) = (Vec::new(), String::new());
+        if let Some(prefix) = &word.prefix {
+            let Some(letter) = typed_form(prefix, from) else {
+                return;
+            };
+            keys.extend(strokes(prefix));
+            keys.push(KeyStroke {
+                key: PhysicalKey::Space,
+                shift: false,
+            });
+            text.push_str(&letter);
+            text.push(' ');
+        }
+        keys.extend(strokes(&word.keys));
         keys.push(word.boundary.0);
-        let mut text = typed.clone();
+        text.push_str(&typed);
         text.push(word.boundary.1);
         self.remember_undone(&typed);
         self.last_undone = Some(typed);
