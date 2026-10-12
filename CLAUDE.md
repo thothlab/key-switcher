@@ -1,39 +1,71 @@
 <!-- prd:start -->
 # KeySwitcher
 
-Нативный переключатель раскладки клавиатуры для macOS, Windows и Linux: исправляет текст, набранный не в той раскладке («ghbdtn» -> «привет»), на лету и по горячим клавишам.
+Нативный переключатель раскладки RU↔EN для macOS, Windows и Linux на Rust: исправляет слово, набранное не в той раскладке («ghbdtn» → «привет»), на пробеле и по горячим клавишам. Вживую проверен только macOS; Windows и Linux собираются, но не запускались.
 
 ## Команды
 
 | Команда | Что делает |
 |---------|------------|
 | `source "$HOME/.cargo/env"` | Подключить Rust: zsh на этой машине сам его не видит |
-| `cargo test -p <crate>` | Тесты крейта; полный набор — `cargo test --workspace` |
-| `cargo clippy -p ks-windows --target x86_64-pc-windows-gnu -- -D warnings` | Проверка компиляции под Windows (так же `x86_64-unknown-linux-gnu` для Linux) |
-| `KS_SIGN_IDENTITY="KeySwitcher Local" sh scripts/macos/build-app.sh` | Собрать и подписать `dist/KeySwitcher.app` |
-| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --status` | Состояние работающего агента: права, перехват, раскладки |
-| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --selftest` | Живая проверка в собственном документе TextEdit (нужны права TCC) |
-| `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания (`docs/eval.md`) |
+| `cargo test --workspace` | Все тесты (~240); один крейт — `cargo test -p ks-core`, один тест — `cargo test -p ks-core <имя>` |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Линтер; держит коммит вместе с `cargo fmt --all -- --check` |
+| `cargo clippy -p ks-windows -p ks-app --target x86_64-pc-windows-gnu -- -D warnings` | Проверка под Windows; под Linux — `-p ks-linux -p ks-app --target x86_64-unknown-linux-gnu` |
+| `KS_SIGN_IDENTITY="KeySwitcher Local" sh scripts/macos/build-app.sh` | Собрать и подписать `dist/KeySwitcher.app`; после — `pkill -f "KeySwitcher.app/Contents/MacOS/keyswitcher"; open dist/KeySwitcher.app` |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --status` | Состояние работающего агента: права, перехват, раскладки, приложение в фокусе |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --selftest` | 18 живых сценариев в собственном документе TextEdit (нужны права TCC; при чужом фокусе отказывается) |
+| `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --settings` | Окно настроек |
+| `sh scripts/windows/build.sh` / `sh scripts/linux/build.sh` | Кросс-сборка `dist/windows/keyswitcher.exe` (mingw-w64) и `dist/linux/keyswitcher` (zig + cargo-zigbuild) |
+| `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания; `--write docs/eval.md` обновляет отчёт |
+| `cargo run --release -p ks-datagen` | Перегенерировать `data/` из hunspell (сеть; Tatoeba только с `--resample-eval`) |
+
+## Каталоги
+
+```
+crates/ks-core       движок: буфер слова, жесты и хоткеи (input/), правило распознавания (detect/), настройки (config/)
+crates/ks-data       Lexicon: словари fst, символьная LM, короткие слова, слабые формы, исключённые приложения
+crates/ks-platform   контракт ОС-слоя (Backend, KeyHandler, TrayHost) и общая модель исполнения (intercept, exec)
+crates/ks-macos      CGEventTap, TIS/UCKeyTranslate, CGEventPost, NSPasteboard, LaunchAgent
+crates/ks-windows    WH_KEYBOARD_LL, SendInput, KLC-таблицы, ключ Run
+crates/ks-linux      evdev без захвата + uinput, смена раскладки X11/KDE/Sway/Hyprland, трей ksni, udev
+crates/ks-app        бинарник keyswitcher: агент, трей, сокет agent.sock, --status/--selftest/--settings
+crates/ks-settings   окно настроек на egui (отдельный процесс)
+crates/ks-eval       замер качества на Tatoeba (data/eval/, части tune/control)
+tools/ks-datagen     генератор data/ из hunspell LibreOffice
+data/                сгенерированные словари и модели (коммитятся), лицензии — data/licenses/, THIRD_PARTY.md
+scripts/             сборка .app и локальный сертификат (macos), build.sh (windows, linux), udev-правило (linux)
+docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
+```
+
+## Архитектура
+
+- Поток: перехват ОС → `InputEvent<N>` → `ks_platform::intercept::TapLogic` (удержание нажатий во время замены, сроки) → `KeyHandler::on_key` → `ks_core::Engine::on_key` → `Outcome { disposition, actions }` → `ks_platform::exec::Executor` исполняет `Action::Replace/SwitchLayout/ConvertSelection` через `Poster`/`Switcher`/`Clipboard` бэкенда.
+- Ядро не знает ОС: время только из `KeyEvent.time_ms`, раскладки — `LayoutMap`, построенные бэкендом из ОС (`UCKeyTranslate`, `ToUnicodeEx`, xkbcommon), не зашитые.
+- Решение на границе слова (`detect::decide`): вето (безопасный ввод, исключённое приложение через `AppRules::excludes`, `words.never`, вид токена, пароль) → CaseFix → словарное вето (кроме слабых форм `data/weak_forms.tsv`) → короткие слова по спискам и контексту → LM. Однобуквенное слово перед исправленным словом исправляется вместе с ним.
+- Отмена: ⇧⇧/Pause, ⌘Z/Ctrl+Z (на отпускании модификатора) и Punto-аккорд ⌘⌥⇧; отменённое слово не исправляется снова до перезапуска (память только в процессе).
+- Настройки — `~/Library/Application Support/KeySwitcher/config.toml` (Windows `%APPDATA%\KeySwitcher`, Linux `~/.config/keyswitcher`); агент следит за файлом и применяет на лету, окно настроек пишет тот же файл. Битый файл не перезаписывается.
+- Умолчания хоткеев: macOS — как Punto Switcher (`undo_or_convert_selection = ["Meta+Alt+Shift"]`, `switch_layout = ["Meta+Space"]`, одиночный Shift выключен); Windows/Linux — `HotkeyConfig::classic` (⇧⇧, Pause, Shift+Pause, оба Shift). `--selftest` всегда гоняется на `classic`.
+
+## Соглашения
+
+- Набранный текст и значения `config.toml` никогда не попадают в логи, статус и ошибки; сети в продуктовых крейтах нет.
+- Новый бэкенд подключается к модели `ks-platform`, а не копирует её: состояние модификаторов хранится в событии на момент захвата, `Switcher::select_layout` укладывается в `SWITCH_TIMEOUT_MS`.
+- Тест обязан падать без своей правки; тесты ядра строят движок на `common::classic()`.
+
+## Окружение
+
+- `KS_SIGN_IDENTITY` — имя сертификата подписи для `build-app.sh` (локально «KeySwitcher Local»).
+- `KS_UNIVERSAL` — собрать универсальный (arm64 + x86_64) `.app`.
+- `CARGO_TARGET_DIR` — свой каталог сборки, если в дереве параллельно собирается что-то ещё.
 
 ## Что уже кусалось
 
 - Права TCC привязаны к подписи: собирай с сертификатом «KeySwitcher Local» (`scripts/macos/create-local-cert.sh`), иначе после каждой пересборки права молча слетают.
 - После выдачи прав агента надо перезапустить: TCC применяет их только к новому процессу.
 - Автокапитализация macOS делает заглавной первую букву документа — самопроверка поэтому печатает после префикса «x ».
-- Параллельные задачи в одном дереве: каждая собирает в свой `CARGO_TARGET_DIR`, иначе ждут блокировку cargo.
+- `.githooks/prepare-commit-msg` (через `core.hooksPath`) вырезает строки `Co-Authored-By` из сообщений коммитов.
 
 ## Инициативы и PRD
 
-Крупные изменения здесь ведутся скиллом `/prd`: он пишет PRD и спек-дельты,
-режет их на задачи и исполняет по коммиту на задачу.
-
-Где что лежит: `~/Documents/openclaw_obsidian_vault/Projects/key-switcher/switcher/PRD/` — требования, PRD, спек-дельты, задачи и отчёты;
-`.../PRD/run/prd_01/dashboard.html` — ход работы.
-
-Два правила, которые стоит знать до того, как что-то менять: снять требование
-из `prd_XX_manifest.md` может только человек, от которого пришёл запрос, а спек-дельта
-попадает в живую спеку не раньше команды `/prd archive NN`.
-
-Работа прервалась на середине — фраза «продолжи PRD» поднимает состояние
-из `run/<prd_XX>/state.js`; ничего пересказывать не нужно.
+Документы первой инициативы: `~/Documents/openclaw_obsidian_vault/Projects/key-switcher/switcher/PRD/` — запрос, требования, PRD, спек-дельты, задачи и отчёты; анализ аналогов, платформ и алгоритма — там же в `analysis/`.
 <!-- prd:end -->
