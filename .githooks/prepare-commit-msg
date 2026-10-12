@@ -1,0 +1,18 @@
+#!/bin/sh
+# Remove AI tool attribution lines and trailing empty lines from commit messages.
+
+MSG_FILE="$1"
+TEMP_FILE=$(mktemp "${MSG_FILE}.XXXXXX") || exit 1
+trap 'rm -f "$TEMP_FILE"' 0
+trap 'exit 1' 1 2 15
+
+PATTERN='(co-authored-by|made[- ]with|generated[- ](with|by|using)).*(cursor|claude|anthropic|codex|openai)'
+
+awk -v pattern="$PATTERN" '
+    tolower($0) ~ pattern { next }
+    /^$/ { blank_lines = blank_lines "\n"; next }
+    {
+        printf "%s%s\n", blank_lines, $0
+        blank_lines = ""
+    }
+' "$MSG_FILE" > "$TEMP_FILE" && cat "$TEMP_FILE" > "$MSG_FILE"
