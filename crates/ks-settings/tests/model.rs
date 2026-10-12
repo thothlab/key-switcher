@@ -11,9 +11,13 @@ use ks_settings::model::{AppError, HotkeyAction, Settings, WordError};
 const TERMINAL: &str = "com.apple.Terminal";
 const TEXTEDIT: &str = "com.apple.TextEdit";
 
+/// Классический набор жестов (⇧⇧ занят): на нём проверяются конфликты сочетаний.
 fn settings() -> Settings {
     Settings::new(
-        Ok(Config::default_for(Os::MacOs)),
+        Ok(Config {
+            hotkeys: ks_core::HotkeyConfig::classic(Os::MacOs),
+            ..Config::default_for(Os::MacOs)
+        }),
         vec![AppId(TERMINAL.into())],
     )
 }

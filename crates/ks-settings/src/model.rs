@@ -13,13 +13,17 @@ use ks_core::{
 /// Действие с горячими клавишами — строка раздела «Горячие клавиши».
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyAction {
+    UndoOrConvertSelection,
+    SwitchLayout,
     UndoOrConvertWord,
     ConvertSelection,
     ToggleAutocorrect,
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 3] = [
+    pub const ALL: [HotkeyAction; 5] = [
+        HotkeyAction::UndoOrConvertSelection,
+        HotkeyAction::SwitchLayout,
         HotkeyAction::UndoOrConvertWord,
         HotkeyAction::ConvertSelection,
         HotkeyAction::ToggleAutocorrect,
@@ -27,6 +31,10 @@ impl HotkeyAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            HotkeyAction::UndoOrConvertSelection => {
+                "Отменить конвертацию или сменить раскладку выделенного текста"
+            }
+            HotkeyAction::SwitchLayout => "Сменить раскладку",
             HotkeyAction::UndoOrConvertWord => "Отменить исправление / конвертировать слово",
             HotkeyAction::ConvertSelection => "Конвертировать выделение",
             HotkeyAction::ToggleAutocorrect => "Вкл/выкл автоматики",
@@ -35,6 +43,8 @@ impl HotkeyAction {
 
     fn of(self, h: &HotkeyConfig) -> &Vec<Hotkey> {
         match self {
+            HotkeyAction::UndoOrConvertSelection => &h.undo_or_convert_selection,
+            HotkeyAction::SwitchLayout => &h.switch_layout,
             HotkeyAction::UndoOrConvertWord => &h.undo_or_convert_word,
             HotkeyAction::ConvertSelection => &h.convert_selection,
             HotkeyAction::ToggleAutocorrect => &h.toggle_autocorrect,
@@ -43,6 +53,8 @@ impl HotkeyAction {
 
     fn of_mut(self, h: &mut HotkeyConfig) -> &mut Vec<Hotkey> {
         match self {
+            HotkeyAction::UndoOrConvertSelection => &mut h.undo_or_convert_selection,
+            HotkeyAction::SwitchLayout => &mut h.switch_layout,
             HotkeyAction::UndoOrConvertWord => &mut h.undo_or_convert_word,
             HotkeyAction::ConvertSelection => &mut h.convert_selection,
             HotkeyAction::ToggleAutocorrect => &mut h.toggle_autocorrect,

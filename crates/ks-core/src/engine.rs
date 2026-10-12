@@ -60,6 +60,7 @@ impl Engine {
             layouts: &self.layouts,
             buffer: &self.buffer,
             os: self.os,
+            layout: &ctx.layout,
         };
         let step = self.input.on_key(ev, ctx, &view);
         self.note_layout(&ctx.layout);

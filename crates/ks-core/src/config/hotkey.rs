@@ -121,6 +121,8 @@ pub fn validate_hotkeys(h: &HotkeyConfig) -> Result<(), HotkeyError> {
         &h.undo_or_convert_word,
         &h.convert_selection,
         &h.toggle_autocorrect,
+        &h.undo_or_convert_selection,
+        &h.switch_layout,
     ];
     if actions.iter().any(|a| a.len() > MAX_PER_ACTION) {
         return Err(HotkeyError::TooMany);
@@ -130,7 +132,9 @@ pub fn validate_hotkeys(h: &HotkeyConfig) -> Result<(), HotkeyError> {
         .undo_or_convert_word
         .iter()
         .chain(&h.convert_selection)
-        .chain(&h.toggle_autocorrect);
+        .chain(&h.toggle_autocorrect)
+        .chain(&h.undo_or_convert_selection)
+        .chain(&h.switch_layout);
     for hotkey in all {
         if let Hotkey::Combo {
             mods,

@@ -34,6 +34,8 @@ pub(crate) struct View<'a> {
     pub(crate) buffer: &'a TokenBuffer,
     /// Чьё стандартное «отменить» слушать.
     pub(crate) os: Os,
+    /// Активная раскладка (из `Context`): от неё считается «другая» для «Сменить раскладку».
+    pub(crate) layout: &'a LayoutId,
 }
 
 /// Ответ модуля на событие.
@@ -55,6 +57,8 @@ enum Command {
     UndoOrConvertWord,
     ConvertSelection,
     ToggleAutocorrect,
+    UndoOrConvertSelection,
+    SwitchLayout,
 }
 
 /// Shift нажат и ещё не отпущен.
@@ -81,12 +85,15 @@ struct Pending {
 struct Chord {
     peak: u8,
     dirty: bool,
+    /// Окно отмены, открытое в момент первого модификатора: нажатия Alt и Shift внутри
+    /// аккорда (⌘⌥⇧) его закрывают, а «отменить или сменить выделение» должно его видеть.
+    window: Option<Finished>,
 }
 
 /// Слово, закрытое пробелом. Из него делаются отмена и ручная конвертация; живёт до первого
 /// нажатия, отличного от Shift. После Enter не запоминается: строка могла уйти (чат),
 /// и что стоит перед кареткой, уже неизвестно.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Finished {
     keys: Vec<(PhysicalKey, Level)>,
     /// В какой раскладке слово стоит набранным (для отмены — куда вернуть).
@@ -275,8 +282,8 @@ impl InputState {
     }
 
     fn shift_up(&mut self, ev: &KeyEvent, ctx: &Context, view: &View, step: &mut Step) {
-        if let Some(peak) = mod_bit(ev.key).and_then(|bit| self.release_modifier(bit)) {
-            self.fire_chord(peak, view, step);
+        if let Some(chord) = mod_bit(ev.key).and_then(|bit| self.release_modifier(bit)) {
+            self.fire_chord(chord, view, step);
         }
         if self.both {
             self.both = self.held & SHIFTS != 0;
@@ -373,8 +380,8 @@ impl InputState {
         let Some(bit) = mod_bit(ev.key) else {
             return;
         };
-        if let Some(peak) = self.release_modifier(bit) {
-            self.fire_chord(peak, view, step);
+        if let Some(chord) = self.release_modifier(bit) {
+            self.fire_chord(chord, view, step);
         }
         if is_undo_modifier(ev.key, view.os) && self.held & undo_bits(view.os) == 0 {
             // Cmd/Ctrl отпущен: ждущая отмена уходит, без Z окно отмены закрывается
@@ -402,7 +409,10 @@ impl InputState {
 
     fn press_modifier(&mut self, bit: u8) {
         if self.held == 0 {
-            self.chord = Some(Chord::default());
+            self.chord = Some(Chord {
+                window: self.finished.clone().filter(|f| f.corrected.is_some()),
+                ..Chord::default()
+            });
         }
         self.held |= bit;
         if let Some(chord) = &mut self.chord {
@@ -412,7 +422,7 @@ impl InputState {
 
     /// Отпущен модификатор; если отпущены все и между ними ничего не нажималось — аккорд
     /// (только Shift не в счёт: это касания).
-    fn release_modifier(&mut self, bit: u8) -> Option<u8> {
+    fn release_modifier(&mut self, bit: u8) -> Option<Chord> {
         if self.held & bit == 0 {
             return None;
         }
@@ -421,7 +431,7 @@ impl InputState {
             return None;
         }
         let chord = self.chord.take()?;
-        (!chord.dirty && chord.peak & !SHIFTS != 0).then_some(chord.peak)
+        (!chord.dirty && chord.peak & !SHIFTS != 0).then_some(chord)
     }
 
     /// Ожидание кончилось без второго касания: это был одиночный Shift.
@@ -446,14 +456,24 @@ impl InputState {
         }
     }
 
-    fn fire_chord(&mut self, peak: u8, view: &View, step: &mut Step) {
-        let chord = mods_of(peak);
+    fn fire_chord(&mut self, chord: Chord, view: &View, step: &mut Step) {
+        let mods_now = mods_of(chord.peak);
         let command = find_command(
             view.config,
-            |h| matches!(h, Hotkey::Combo { mods, key: None } if same_mods(*mods, chord)),
+            |h| matches!(h, Hotkey::Combo { mods, key: None } if same_mods(*mods, mods_now)),
         );
-        if let Some(command) = command {
-            self.run(command, view, step);
+        match command {
+            // окно отмены — каким оно было в начале аккорда; отмена уходит на отпускании,
+            // когда модификаторы уже отпущены и стирание не станет Cmd/Alt+Backspace
+            Some(Command::UndoOrConvertSelection) => match chord.window {
+                Some(word) => {
+                    self.finished = None;
+                    self.undo(word, view.layouts, step);
+                }
+                None => step.actions.push(Action::ConvertSelection),
+            },
+            Some(command) => self.run(command, view, step),
+            None => {}
         }
     }
 
@@ -462,6 +482,18 @@ impl InputState {
             Command::UndoOrConvertWord => self.undo_or_convert(view, step),
             Command::ConvertSelection => step.actions.push(Action::ConvertSelection),
             Command::ToggleAutocorrect => step.actions.push(Action::ToggleAutocorrect),
+            Command::UndoOrConvertSelection => {
+                match self.finished.take_if(|f| f.corrected.is_some()) {
+                    Some(word) => self.undo(word, view.layouts, step),
+                    None => step.actions.push(Action::ConvertSelection),
+                }
+            }
+            Command::SwitchLayout => {
+                if let Some(target) = switch_target(view.layouts, view.layout).cloned() {
+                    step.actions.push(Action::SwitchLayout(target.clone()));
+                    step.switched_to = Some(target);
+                }
+            }
         }
     }
 
@@ -551,6 +583,11 @@ fn find_command(config: &Config, matches: impl Fn(&Hotkey) -> bool) -> Option<Co
         (Command::UndoOrConvertWord, &h.undo_or_convert_word),
         (Command::ConvertSelection, &h.convert_selection),
         (Command::ToggleAutocorrect, &h.toggle_autocorrect),
+        (
+            Command::UndoOrConvertSelection,
+            &h.undo_or_convert_selection,
+        ),
+        (Command::SwitchLayout, &h.switch_layout),
     ]
     .into_iter()
     .find(|(_, list)| list.iter().any(&matches))

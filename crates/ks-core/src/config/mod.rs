@@ -53,6 +53,11 @@ pub struct HotkeyConfig {
     pub undo_or_convert_word: Vec<Hotkey>,
     pub convert_selection: Vec<Hotkey>,
     pub toggle_autocorrect: Vec<Hotkey>,
+    /// Как в Punto Switcher: окно отмены открыто — отменить исправление, иначе — сменить
+    /// раскладку выделенного текста.
+    pub undo_or_convert_selection: Vec<Hotkey>,
+    /// Переключить раскладку на другую из пары RU/EN.
+    pub switch_layout: Vec<Hotkey>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +106,8 @@ impl Config {
         Config {
             version: VERSION,
             autocorrect: true,
-            single_shift_switch: true,
+            // на macOS умолчания как в Punto Switcher: раскладка — ⌘Пробел, не одиночный Shift
+            single_shift_switch: os != Os::MacOs,
             autostart: true,
             hotkeys: HotkeyConfig::default_for(os),
             apps: AppRules::default(),
@@ -252,6 +258,8 @@ fn unknown_keys(text: &str) -> Vec<String> {
                 "undo_or_convert_word",
                 "convert_selection",
                 "toggle_autocorrect",
+                "undo_or_convert_selection",
+                "switch_layout",
             ],
         ),
         ("apps", &["enabled", "disabled"]),
@@ -281,7 +289,39 @@ fn unknown_keys(text: &str) -> Vec<String> {
 
 impl HotkeyConfig {
     /// `convert_selection`: macOS — `Alt+Shift`, иначе `Shift+Pause`.
+    /// Умолчания. На macOS — как в Punto Switcher: ⌘⌥⇧ отменяет исправление или меняет
+    /// раскладку выделенного текста, ⌘Пробел переключает раскладку; остальное без хоткея.
+    /// На Windows и Linux — классический набор.
     pub fn default_for(os: Os) -> HotkeyConfig {
+        match os {
+            Os::MacOs => HotkeyConfig {
+                undo_or_convert_word: vec![],
+                convert_selection: vec![],
+                toggle_autocorrect: vec![],
+                undo_or_convert_selection: vec![Hotkey::Combo {
+                    mods: Modifiers {
+                        meta: true,
+                        alt: true,
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    key: None,
+                }],
+                switch_layout: vec![Hotkey::Combo {
+                    mods: Modifiers {
+                        meta: true,
+                        ..Modifiers::default()
+                    },
+                    key: Some(PhysicalKey::Space),
+                }],
+            },
+            Os::Windows | Os::Linux => HotkeyConfig::classic(os),
+        }
+    }
+
+    /// Классический набор: ⇧⇧ и Pause — отменить/конвертировать слово, ⌥⇧ (macOS) или
+    /// Shift+Pause — выделение, оба Shift — вкл/выкл автоматики. На нём держится `--selftest`.
+    pub fn classic(os: Os) -> HotkeyConfig {
         let pause = Hotkey::Combo {
             mods: Modifiers::default(),
             key: Some(PhysicalKey::Pause),
@@ -307,6 +347,8 @@ impl HotkeyConfig {
             undo_or_convert_word: vec![Hotkey::DoubleShift, pause],
             convert_selection: vec![convert_selection],
             toggle_autocorrect: vec![Hotkey::BothShifts],
+            undo_or_convert_selection: vec![],
+            switch_layout: vec![],
         }
     }
 }
@@ -430,7 +472,7 @@ mod tests {
     /// PRD 31: до двух назначений на действие.
     #[test]
     fn more_than_two_hotkeys_per_action_are_rejected() {
-        let mut h = HotkeyConfig::default_for(Os::MacOs);
+        let mut h = HotkeyConfig::classic(Os::MacOs);
         h.convert_selection.push("Ctrl+Alt+KeyK".parse().unwrap());
         assert_eq!(validate_hotkeys(&h), Ok(()), "два — можно");
         h.convert_selection.push("Ctrl+Alt+KeyJ".parse().unwrap());

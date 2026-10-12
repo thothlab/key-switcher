@@ -77,7 +77,17 @@ pub fn ru_win() -> LayoutMap {
 }
 
 pub fn engine(layouts: Vec<LayoutMap>) -> Engine {
-    engine_with(Config::default_for(Os::MacOs), layouts)
+    engine_with(classic(), layouts)
+}
+
+/// Классический набор жестов (⇧⇧, Pause, ⌥⇧, оба Shift, одиночный Shift) — на нём построены
+/// сценарии ручного управления; умолчания macOS теперь как в Punto Switcher.
+pub fn classic() -> Config {
+    Config {
+        single_shift_switch: true,
+        hotkeys: ks_core::HotkeyConfig::classic(Os::MacOs),
+        ..Config::default_for(Os::MacOs)
+    }
 }
 
 pub fn engine_with(config: Config, layouts: Vec<LayoutMap>) -> Engine {

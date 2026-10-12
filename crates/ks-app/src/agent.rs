@@ -224,6 +224,22 @@ impl Agent {
         log::info!("новый сеанс движка");
     }
 
+    /// Сеанс для `--selftest`: настройки пользователя, но классический набор жестов (⇧⇧,
+    /// ⌥⇧, оба Shift) — на нём написаны сценарии, а умолчания macOS как в Punto Switcher.
+    #[cfg(target_os = "macos")]
+    fn selftest_engine(&self) {
+        let mut config = self.handler.config();
+        config.hotkeys = ks_core::HotkeyConfig::classic(Os::current());
+        config.single_shift_switch = false;
+        let engine = Engine::new(
+            Config::default_for(Os::current()),
+            self.lexicon.clone(),
+            self.backend.layouts(),
+        );
+        self.handler.renew_with(engine, config);
+        log::info!("сеанс движка для самопроверки");
+    }
+
     /// Пишет настройки в файл, если он не испорчен.
     fn save(&self) {
         let (Some(path), Some(config)) = (&self.config_path, self.handler.config_to_save()) else {
@@ -319,8 +335,10 @@ impl Agent {
             "selftest" => {
                 // Память отменённых слов живёт весь сеанс: без нового сеанса сценарии, которые
                 // ждут исправления, упали бы на словах, отменённых раньше.
-                self.fresh_engine();
+                self.selftest_engine();
                 let ok = crate::selftest::run(out, &*self.handler, &*self.backend);
+                // после прогона — снова настройки пользователя и чистый сеанс
+                self.fresh_engine();
                 let _ = writeln!(out, "RESULT: {}", if ok { "PASS" } else { "FAIL" });
             }
             "pid" => {

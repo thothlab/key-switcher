@@ -120,10 +120,17 @@ impl EngineHandler {
 
     /// Новый сеанс движка с теми же настройками: слово в работе, память отменённых слов и
     /// пункт «Не исправлять „…“» забываются. На диск ничего не пишется.
-    pub fn renew(&self, mut fresh: Engine) {
+    pub fn renew(&self, fresh: Engine) {
+        let config = lock(&self.state).config.clone();
+        self.renew_with(fresh, config);
+    }
+
+    /// Новый сеанс движка с заданными настройками, файл и состояние агента не меняются
+    /// (`--selftest` гоняет сценарии на классическом наборе жестов).
+    pub fn renew_with(&self, mut fresh: Engine, config: Config) {
         let mut engine = lock(&self.engine);
         let mut state = lock(&self.state);
-        fresh.set_config(state.config.clone());
+        fresh.set_config(config);
         *engine = fresh;
         state.undone_word = None;
         drop(state);

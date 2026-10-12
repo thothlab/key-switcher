@@ -7,17 +7,19 @@ use ks_core::{
     validate_hotkeys,
 };
 
-/// Пример файла из PRD «Модель данных» — это и есть умолчания macOS.
-const PRD_EXAMPLE: &str = r#"
+/// Умолчания macOS — как в Punto Switcher (⌘⌥⇧, ⌘Пробел, остальное без хоткея).
+const MAC_EXAMPLE: &str = r#"
 version = 1
 autocorrect = true            # автоматика вкл/выкл
-single_shift_switch = true    # одиночный Shift переключает раскладку
+single_shift_switch = false   # раскладка — ⌘Пробел, не одиночный Shift
 autostart = true
 
 [hotkeys]                     # до двух назначений на действие; [] = без хоткея
-undo_or_convert_word = ["DoubleShift", "Pause"]
-convert_selection    = ["Alt+Shift"]               # macOS; на Windows/Linux по умолчанию ["Shift+Pause"]
-toggle_autocorrect   = ["BothShifts"]
+undo_or_convert_word      = []
+convert_selection         = []
+toggle_autocorrect        = []
+undo_or_convert_selection = ["Meta+Alt+Shift"]  # отменить исправление или сменить выделение
+switch_layout             = ["Meta+Space"]
 
 [apps]                        # bundle id (macOS), имя exe (Windows), app_id/WM_CLASS (Linux)
 enabled  = []                 # включить автоматику в приложении из встроенного списка исключений
@@ -38,22 +40,25 @@ fn combo(mods: Modifiers, key: Option<PhysicalKey>) -> Hotkey {
 }
 
 #[test]
-fn defaults_match_the_prd_example_file() {
+fn defaults_match_the_example_file() {
     let dir = temp_dir("prd");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
-    std::fs::write(&path, PRD_EXAMPLE).unwrap();
+    std::fs::write(&path, MAC_EXAMPLE).unwrap();
     let mac = Config::default_for(Os::MacOs);
     assert_eq!(Config::load(&path).unwrap(), mac);
 
     assert_eq!(mac.version, 1);
-    assert!(mac.autocorrect && mac.single_shift_switch && mac.autostart);
+    assert!(mac.autocorrect && !mac.single_shift_switch && mac.autostart);
     let alt_shift = Modifiers {
         alt: true,
         shift: true,
         ..Modifiers::default()
     };
-    assert_eq!(mac.hotkeys.convert_selection, vec![combo(alt_shift, None)]);
+    assert_eq!(
+        HotkeyConfig::classic(Os::MacOs).convert_selection,
+        vec![combo(alt_shift, None)]
+    );
     let shift = Modifiers {
         shift: true,
         ..Modifiers::default()
@@ -138,7 +143,7 @@ fn hotkeys_round_trip_through_text() {
 
 #[test]
 fn hotkey_validation_rejects_duplicates_and_bare_letters() {
-    let mut hotkeys = HotkeyConfig::default_for(Os::MacOs);
+    let mut hotkeys = HotkeyConfig::classic(Os::MacOs);
     assert_eq!(validate_hotkeys(&hotkeys), Ok(()));
 
     hotkeys.toggle_autocorrect = vec![Hotkey::DoubleShift];

@@ -38,7 +38,7 @@ fn replace(
 }
 
 fn config() -> Config {
-    Config::default_for(Os::MacOs)
+    classic()
 }
 
 fn autocorrect_off() -> Config {
@@ -530,4 +530,131 @@ fn hotkey_in_the_middle_of_a_word_interrupts_it() {
         Outcome::pass(),
         "остаток слова после хоткея решён вместе с началом"
     );
+}
+
+// --- Умолчания macOS как в Punto Switcher ---------------------------------------------------
+
+fn punto() -> Config {
+    Config::default_for(Os::MacOs)
+}
+
+fn meta() -> Modifiers {
+    Modifiers {
+        meta: true,
+        ..Modifiers::default()
+    }
+}
+
+/// ⌘⌥⇧: Cmd, Alt, Shift нажаты по очереди и отпущены в обратном порядке, без других клавиш.
+fn cmd_alt_shift(e: &mut Engine, c: &Context, t: u64) -> Vec<Outcome> {
+    let all = Modifiers {
+        meta: true,
+        alt: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+    vec![
+        key_at(e, c, K::MetaLeft, KeyDir::Down, meta(), t),
+        key_at(
+            e,
+            c,
+            K::AltLeft,
+            KeyDir::Down,
+            mods(false, true, false, false),
+            t + 10,
+        ),
+        key_at(e, c, K::ShiftLeft, KeyDir::Down, all, t + 20),
+        key_at(e, c, K::ShiftLeft, KeyDir::Up, Modifiers::default(), t + 80),
+        key_at(e, c, K::AltLeft, KeyDir::Up, Modifiers::default(), t + 90),
+        key_at(e, c, K::MetaLeft, KeyDir::Up, Modifiers::default(), t + 100),
+    ]
+}
+
+#[test]
+fn punto_defaults_on_macos() {
+    let c = punto();
+    assert!(
+        !c.single_shift_switch,
+        "раскладка — ⌘Пробел, не одиночный Shift"
+    );
+    let h = &c.hotkeys;
+    assert_eq!(
+        h.undo_or_convert_selection,
+        ["Meta+Alt+Shift".parse().unwrap()]
+    );
+    assert_eq!(h.switch_layout, ["Meta+Space".parse().unwrap()]);
+    assert!(h.undo_or_convert_word.is_empty());
+    assert!(h.convert_selection.is_empty());
+    assert!(h.toggle_autocorrect.is_empty());
+    assert_eq!(ks_core::validate_hotkeys(h), Ok(()));
+}
+
+#[test]
+fn cmd_alt_shift_right_after_correction_undoes_it() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine_with(punto(), vec![us.clone(), ru.clone()]);
+    corrected_ghbdtn(&mut e, &us, &ru);
+    let out = cmd_alt_shift(&mut e, &ctx(&ru), 5_000);
+    let undo = actions(&out);
+    assert!(
+        matches!(
+            undo.as_slice(),
+            [Action::Replace {
+                kind: ReplaceKind::Undo,
+                ..
+            }]
+        ),
+        "{undo:?}"
+    );
+    assert!(
+        actions(&out[..5]).is_empty(),
+        "отмена уходит только на отпускании последнего модификатора"
+    );
+}
+
+#[test]
+fn cmd_alt_shift_without_correction_converts_the_selection() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine_with(punto(), vec![us.clone(), ru.clone()]);
+    let out = cmd_alt_shift(&mut e, &ctx(&us), 5_000);
+    assert_eq!(actions(&out), vec![Action::ConvertSelection]);
+}
+
+#[test]
+fn cmd_space_switches_the_layout_and_is_swallowed() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine_with(punto(), vec![us.clone(), ru.clone()]);
+    let c = ctx(&us);
+    key_at(&mut e, &c, K::MetaLeft, KeyDir::Down, meta(), 1_000);
+    let down = key_at(&mut e, &c, K::Space, KeyDir::Down, meta(), 1_010);
+    assert_eq!(
+        down.disposition,
+        Disposition::Swallow,
+        "Spotlight не открывается"
+    );
+    assert_eq!(down.actions, vec![Action::SwitchLayout(ru.id.clone())]);
+    let back = {
+        let c = ctx(&ru);
+        key_at(&mut e, &c, K::Space, KeyDir::Up, meta(), 1_040);
+        key_at(
+            &mut e,
+            &c,
+            K::MetaLeft,
+            KeyDir::Up,
+            Modifiers::default(),
+            1_060,
+        );
+        key_at(&mut e, &c, K::MetaLeft, KeyDir::Down, meta(), 2_000);
+        key_at(&mut e, &c, K::Space, KeyDir::Down, meta(), 2_010)
+    };
+    assert_eq!(back.actions, vec![Action::SwitchLayout(us.id.clone())]);
+}
+
+#[test]
+fn single_shift_does_not_switch_with_punto_defaults() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine_with(punto(), vec![us.clone(), ru.clone()]);
+    let out = shift_tap(&mut e, &ctx(&us), K::ShiftLeft, 1_000);
+    assert!(actions(&out).is_empty());
+    assert_eq!(e.tick(LATER), vec![]);
 }

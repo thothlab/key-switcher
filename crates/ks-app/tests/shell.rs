@@ -134,8 +134,17 @@ fn config_path(test: &str) -> PathBuf {
 
 fn agent(test: &str, backend: Arc<FakeBackend>, file: Option<&str>) -> (Arc<Agent>, PathBuf) {
     let path = config_path(test);
-    if let Some(text) = file {
-        std::fs::write(&path, text).unwrap();
+    match file {
+        Some(text) => std::fs::write(&path, text).unwrap(),
+        // классический набор жестов (⇧⇧, одиночный и оба Shift): на нём написаны сценарии;
+        // умолчания macOS теперь как в Punto Switcher
+        None => ks_core::Config {
+            single_shift_switch: true,
+            hotkeys: ks_core::HotkeyConfig::classic(ks_core::Os::current()),
+            ..ks_core::Config::default()
+        }
+        .save(&path)
+        .unwrap(),
     }
     (
         Arc::new(Agent::with_config_path(backend, Some(path.clone()))),
