@@ -1,32 +1,41 @@
 //! Окно на eframe/egui: разделы слева, содержимое справа. Каждое действие — `Settings::edit`
 //! (перечитать файл, одна правка, записать); агент сам применяет записанный файл. Раз в полсекунды
-//! окно смотрит просьбу второго окна подняться, внешнюю правку файла (команды меню) и права.
+//! окно смотрит просьбу второго окна подняться, внешнюю правку файла (команды меню), права и
+//! (в разделе «Приложения-исключения») запущенные приложения.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use eframe::egui::{self, Color32, RichText};
-use ks_core::{AppId, Hotkey, config::MAX_PER_ACTION};
+use eframe::egui::{self, Align, Color32, Layout, RichText, TextWrapMode, vec2};
+use ks_core::{AppCategory, AppId, Hotkey, config::MAX_PER_ACTION};
 use ks_platform::{PermissionKind, PermissionStatus};
 
 use crate::instance::{self, Guard};
-use crate::model::{HotkeyAction, Settings};
+use crate::model::{BuiltinRow, Exclusion, HotkeyAction, Settings};
 use crate::record::{self, Recorded, Recorder};
 use crate::{Host, Section, about};
 
 const POLL: Duration = Duration::from_millis(500);
 
-pub const EMPTY_APPS: &str = "Своих исключений нет — приложение добавляется пунктом меню \
-                              „Не исправлять в …“ или здесь";
+pub const EMPTY_APPS: &str = "Своих исключений нет — приложение добавляется здесь или пунктом \
+                              меню „Не исправлять в …“";
 pub const EMPTY_WORDS: &str = "Слов-исключений нет — слово попадает сюда после отмены исправления \
                                и пункта меню „Не исправлять …“ или здесь";
 
+/// Высота строк-полей: поле сочетания, кнопки списков.
+const ROW_H: f32 = 26.0;
+
 pub(crate) fn show(section: Section, path: &Path, host: Host, guard: Guard) -> anyhow::Result<()> {
+    #[cfg(debug_assertions)]
+    let size = crate::shot::Shot::size().unwrap_or([820.0, 580.0]);
+    #[cfg(not(debug_assertions))]
+    let size = [820.0, 580.0];
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("KeySwitcher — настройки")
-            .with_inner_size([760.0, 540.0])
-            .with_min_inner_size([560.0, 380.0]),
+            .with_inner_size(size)
+            .with_min_inner_size([640.0, 420.0]),
         ..Default::default()
     };
     let window = Window::new(section, path, host, guard);
@@ -61,7 +70,28 @@ fn kind_title(kind: PermissionKind) -> &'static str {
     }
 }
 
+fn category_title(category: AppCategory) -> &'static str {
+    match category {
+        AppCategory::Terminal => "Терминалы",
+        AppCategory::Ide => "Среды разработки",
+        AppCategory::Editor => "Редакторы кода",
+        AppCategory::Password => "Менеджеры паролей",
+        AppCategory::Remote => "Удалённый доступ",
+    }
+}
+
 const GRANTED: Color32 = Color32::from_rgb(0x2e, 0x9e, 0x4f);
+
+/// Что сделали в строке раздела «Горячие клавиши».
+enum HotkeyEvent {
+    /// Флажок действия.
+    Toggle(bool),
+    /// Щелчок по полю: записать сочетание в ячейку.
+    Record(usize),
+    /// Готовое сочетание или жест из списка «…».
+    Set(usize, Hotkey),
+    Remove(usize),
+}
 
 struct Window {
     path: PathBuf,
@@ -75,6 +105,14 @@ struct Window {
     app_msg: Option<String>,
     hotkey_msg: Option<(HotkeyAction, String)>,
     recording: Option<(HotkeyAction, usize, Recorder)>,
+    /// Назначения действий, у которых сняли флажок: флажок обратно — они возвращаются.
+    parked: HashMap<HotkeyAction, Vec<Hotkey>>,
+    /// Запущенные приложения (идентификатор, имя) для выбора своего исключения.
+    running: Vec<(AppId, String)>,
+    /// Имена установленных приложений по идентификатору: спрашиваются у системы один раз.
+    names: HashMap<AppId, Option<String>>,
+    /// Поле «идентификатор вручную» раскрыто.
+    manual_app: bool,
     save_error: Option<String>,
     restart_msg: Option<String>,
     /// Идёт перезапуск: ответ потока, который ждёт новый агент.
@@ -82,6 +120,8 @@ struct Window {
     permissions: Vec<PermissionStatus>,
     mtime: Option<SystemTime>,
     next_poll: Instant,
+    #[cfg(debug_assertions)]
+    shot: Option<crate::shot::Shot>,
     _guard: Guard,
 }
 
@@ -92,6 +132,11 @@ impl Window {
             .backend
             .as_ref()
             .map(|b| b.permissions())
+            .unwrap_or_default();
+        let running = host
+            .backend
+            .as_ref()
+            .map(|b| b.running_apps())
             .unwrap_or_default();
         Window {
             path: path.to_path_buf(),
@@ -105,25 +150,30 @@ impl Window {
             app_msg: None,
             hotkey_msg: None,
             recording: None,
+            parked: HashMap::new(),
+            manual_app: running.is_empty(),
+            running,
+            names: HashMap::new(),
             save_error: None,
             restart_msg: None,
             restarting: None,
             permissions,
             mtime: mtime(path),
             next_poll: Instant::now() + POLL,
+            #[cfg(debug_assertions)]
+            shot: crate::shot::Shot::from_env(),
             _guard: guard,
         }
     }
 
-    /// Просьба второго окна подняться, внешняя правка файла, права.
+    /// Просьба второго окна подняться, внешняя правка файла, права, запущенные приложения.
     fn poll(&mut self, ctx: &egui::Context) {
         if Instant::now() < self.next_poll {
             return;
         }
         self.next_poll = Instant::now() + POLL;
         if let Some(section) = instance::take_raise(&self.dir) {
-            self.section = section;
-            self.recording = None;
+            self.go(section);
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -134,7 +184,15 @@ impl Window {
         }
         if let Some(backend) = &self.host.backend {
             self.permissions = backend.permissions();
+            if self.section == Section::Apps {
+                self.running = backend.running_apps();
+            }
         }
+    }
+
+    fn go(&mut self, section: Section) {
+        self.section = section;
+        self.recording = None;
     }
 
     /// Одна правка файла; ошибку показывает вызывающий там, где она понятна.
@@ -158,6 +216,9 @@ impl Window {
             s.set_hotkey(action, slot, hotkey)
                 .map_err(|e| format!("«{shown}»: {e}"))
         });
+        if result.is_ok() {
+            self.parked.remove(&action);
+        }
         self.hotkey_msg = result.err().map(|e| (action, e));
     }
 
@@ -176,6 +237,12 @@ impl Window {
             return;
         };
         let (action, slot) = (*action, *slot);
+        // ⌘Пробел во время записи открывает Spotlight, окно уходит в фон: запись снимается, а не
+        // висит «Нажмите сочетание…»
+        if !ctx.input(|i| i.focused) {
+            self.recording = None;
+            return;
+        }
         let (events, held) = ctx.input_mut(|i| (std::mem::take(&mut i.events), i.modifiers));
         match recorder.feed(&events, held) {
             Recorded::Pending => {}
@@ -215,127 +282,293 @@ impl Window {
         }
     }
 
+    /// Флажок с пояснением под ним; `Some` — флажок переключили.
+    fn option(ui: &mut egui::Ui, on: bool, title: &str, hint: &str) -> Option<bool> {
+        let mut value = on;
+        let changed = ui.checkbox(&mut value, title).changed();
+        ui.indent(title, |ui| {
+            ui.add(egui::Label::new(RichText::new(hint).weak()).wrap_mode(TextWrapMode::Wrap));
+        });
+        ui.add_space(10.0);
+        changed.then_some(value)
+    }
+
+    /// Строка списка: название, под ним подпись мелко, справа «Удалить». `true` — удалить.
+    fn list_row(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) -> bool {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(title);
+                if let Some(sub) = subtitle {
+                    ui.label(RichText::new(sub).small().weak());
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                remove = ui.button("Удалить").clicked();
+            });
+        });
+        ui.separator();
+        remove
+    }
+
     fn general(&mut self, ui: &mut egui::Ui) {
+        if self.permissions.iter().any(|p| !p.granted) {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "KeySwitcher не видит клавиатуру: не выданы разрешения.",
+                );
+                if ui.button("Открыть «Разрешения»").clicked() {
+                    self.go(Section::Permissions);
+                }
+            });
+            ui.add_space(10.0);
+        }
         let config = self.settings.config().clone();
-        let mut autocorrect = config.autocorrect;
-        if ui
-            .checkbox(&mut autocorrect, "Автоисправление на лету")
-            .changed()
-        {
+        if let Some(on) = Self::option(
+            ui,
+            config.autocorrect,
+            "Исправлять раскладку на лету",
+            if cfg!(target_os = "macos") {
+                "Слово, набранное не в той раскладке, исправляется после пробела: «ghbdtn» → \
+                 «привет». Отменить исправление — сразу Cmd+Z или горячей клавишей."
+            } else {
+                "Слово, набранное не в той раскладке, исправляется после пробела: «ghbdtn» → \
+                 «привет». Отменить исправление — сразу Ctrl+Z или горячей клавишей."
+            },
+        ) {
             self.save(|s| {
-                s.set_autocorrect(autocorrect);
+                s.set_autocorrect(on);
                 Ok(())
             });
         }
-        let mut single = config.single_shift_switch;
-        if ui
-            .checkbox(&mut single, "Одиночный Shift переключает раскладку")
-            .changed()
-        {
+        if let Some(on) = Self::option(
+            ui,
+            config.autostart,
+            "Запускать KeySwitcher при входе в систему",
+            "Значок в строке меню появится сам после входа.",
+        ) {
             self.save(|s| {
-                s.set_single_shift_switch(single);
+                s.set_autostart(on);
                 Ok(())
             });
         }
-        let mut autostart = config.autostart;
-        if ui
-            .checkbox(&mut autostart, "Запускать KeySwitcher при входе в систему")
-            .changed()
-        {
-            self.save(|s| {
-                s.set_autostart(autostart);
-                Ok(())
-            });
-        }
-        ui.add_space(8.0);
         ui.weak("Изменения применяются сразу, без перезапуска.");
     }
 
     fn hotkeys(&mut self, ui: &mut egui::Ui) {
-        ui.weak(
-            "До двух назначений на действие. Сочетания записываются нажатием, жесты Shift и Pause \
-             выбираются из списка. Одиночный Shift — флажок в «Общих».",
-        );
+        let hint = if cfg!(target_os = "macos") {
+            "Щёлкните поле и нажмите сочетание, Esc — отмена. Сочетание из одних модификаторов \
+             (Cmd + Option + Shift) срабатывает, когда их отпускают. Сочетания, которые забирает \
+             система (Cmd + Пробел), жесты Shift и Pause — в списке «…» рядом с полем."
+        } else {
+            "Щёлкните поле и нажмите сочетание, Esc — отмена. Сочетание из одних модификаторов \
+             (Ctrl + Shift) срабатывает, когда их отпускают. Сочетания, которые забирает система \
+             (Win + Пробел), жесты Shift и Pause — в списке «…» рядом с полем."
+        };
+        ui.add(egui::Label::new(hint).wrap_mode(TextWrapMode::Wrap));
+        ui.add_space(12.0);
+        let field_w = (ui.available_width() * 0.34).clamp(150.0, 230.0);
         for action in HotkeyAction::ALL {
-            ui.add_space(10.0);
-            ui.strong(action.label());
-            let current = self.settings.hotkeys(action).to_vec();
-            if current.is_empty() {
-                ui.weak("без горячей клавиши");
-            }
-            for (slot, hotkey) in current.iter().enumerate() {
-                let mut record = false;
-                let mut remove = false;
-                ui.horizontal(|ui| {
-                    if self.is_recording(action, slot) {
-                        ui.label("Нажмите сочетание… (Esc — отмена)");
-                    } else {
-                        ui.monospace(record::label(hotkey));
+            self.hotkey_row(ui, action, field_w);
+            ui.add_space(8.0);
+        }
+        ui.separator();
+        ui.add_space(4.0);
+        let single = self.settings.config().single_shift_switch;
+        if let Some(on) = Self::option(
+            ui,
+            single,
+            "Сменить раскладку одиночным Shift",
+            "Короткое нажатие Shift без других клавиш переключает раскладку.",
+        ) {
+            self.save(|s| {
+                s.set_single_shift_switch(on);
+                Ok(())
+            });
+        }
+    }
+
+    /// Строка действия как в Punto Switcher: название, флажок, поле сочетания, список «…». Второе
+    /// назначение (классический набор: двойной Shift и Pause) — второй строкой под первым.
+    fn hotkey_row(&mut self, ui: &mut egui::Ui, action: HotkeyAction, field_w: f32) {
+        let current = self.settings.hotkeys(action).to_vec();
+        let adding = !current.is_empty() && self.is_recording(action, current.len());
+        let rows = current.len().max(1) + usize::from(adding);
+        let spacing = ui.spacing().item_spacing.x;
+        let side = ui.spacing().interact_size.y + field_w + 2.0 * 28.0 + 4.0 * spacing;
+        let label_w = (ui.available_width() - side).max(120.0);
+        let mut event = None;
+        for slot in 0..rows {
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(label_w, ROW_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_min_width(label_w);
+                        if slot == 0 {
+                            ui.add(
+                                egui::Label::new(format!("{}:", action.label()))
+                                    .wrap_mode(TextWrapMode::Wrap),
+                            );
+                        }
+                    },
+                );
+                if slot == 0 {
+                    let mut on = !current.is_empty() || self.is_recording(action, 0);
+                    if ui.add(egui::Checkbox::without_text(&mut on)).changed() {
+                        event = Some(HotkeyEvent::Toggle(on));
                     }
-                    record = ui.button("Записать").clicked();
-                    remove = ui.button("Убрать").clicked();
-                });
-                if record {
-                    self.start_recording(action, slot);
+                } else {
+                    ui.add_space(ui.spacing().interact_size.y);
                 }
-                if remove {
-                    self.hotkey_msg = None;
-                    self.save(|s| {
-                        s.remove_hotkey(action, slot);
-                        Ok(())
-                    });
+                let recording = self.is_recording(action, slot);
+                let text = match (recording, current.get(slot)) {
+                    (true, _) => RichText::new("Нажмите сочетание…"),
+                    (false, Some(h)) => RichText::new(record::label(h)),
+                    (false, None) => RichText::new("не задано").weak(),
+                };
+                let field = ui
+                    .add(
+                        egui::Button::new(text)
+                            .min_size(vec2(field_w, ROW_H))
+                            .selected(recording)
+                            .truncate(),
+                    )
+                    .on_hover_text("Щёлкните и нажмите сочетание");
+                if field.clicked() {
+                    event = Some(HotkeyEvent::Record(slot));
                 }
-            }
-            // Третье назначение окно не предлагает (PRD 31).
-            if current.len() < MAX_PER_ACTION {
-                let slot = current.len();
-                let mut record = false;
-                let mut chosen = None;
-                ui.horizontal(|ui| {
-                    if self.is_recording(action, slot) {
-                        ui.label("Нажмите сочетание… (Esc — отмена)");
-                    } else {
-                        record = ui.button("Записать новое").clicked();
+                let assigned = current.get(slot).is_some();
+                ui.menu_button("…", |ui| {
+                    ui.label(RichText::new("Готовые сочетания").weak());
+                    for preset in record::presets().into_iter().chain(record::gestures()) {
+                        if ui.button(record::label(&preset)).clicked() {
+                            event = Some(HotkeyEvent::Set(slot, preset));
+                        }
                     }
-                    egui::ComboBox::from_id_salt(("gesture", action.label()))
-                        .selected_text("Жест…")
-                        .show_ui(ui, |ui| {
-                            for g in record::gestures() {
-                                if ui.selectable_label(false, record::label(&g)).clicked() {
-                                    chosen = Some(g);
-                                }
-                            }
-                        });
-                });
-                if record {
-                    self.start_recording(action, slot);
+                    if assigned {
+                        ui.separator();
+                        if ui.button("Убрать").clicked() {
+                            event = Some(HotkeyEvent::Remove(slot));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Готовые сочетания и жесты");
+                // Третье назначение окно не предлагает (PRD 31).
+                if slot == 0
+                    && current.len() == 1
+                    && !adding
+                    && MAX_PER_ACTION > 1
+                    && ui
+                        .small_button("+")
+                        .on_hover_text("Добавить второе сочетание")
+                        .clicked()
+                {
+                    event = Some(HotkeyEvent::Record(1));
                 }
-                if let Some(g) = chosen {
-                    self.set_hotkey(action, slot, g);
-                }
-            }
-            if let Some((a, msg)) = &self.hotkey_msg
-                && *a == action
-            {
+            });
+        }
+        if let Some((a, msg)) = &self.hotkey_msg
+            && *a == action
+        {
+            ui.horizontal(|ui| {
+                ui.add_space(label_w + spacing);
                 ui.colored_label(ui.visuals().error_fg_color, msg);
+            });
+        }
+        match event {
+            Some(HotkeyEvent::Toggle(false)) => {
+                self.hotkey_msg = None;
+                if matches!(&self.recording, Some((a, _, _)) if *a == action) {
+                    self.recording = None;
+                }
+                let mut parked = Vec::new();
+                self.save(|s| {
+                    parked = s.clear_hotkeys(action);
+                    Ok(())
+                });
+                if !parked.is_empty() {
+                    self.parked.insert(action, parked);
+                }
             }
+            Some(HotkeyEvent::Toggle(true)) => match self.parked.remove(&action) {
+                Some(parked) => {
+                    let result =
+                        self.edit(|s| s.restore_hotkeys(action, parked).map_err(|e| e.to_string()));
+                    if let Err(e) = result {
+                        self.hotkey_msg = Some((action, e));
+                        self.recording = Some((action, 0, Recorder::new()));
+                    }
+                }
+                None => self.start_recording(action, 0),
+            },
+            Some(HotkeyEvent::Record(slot)) => self.start_recording(action, slot),
+            Some(HotkeyEvent::Set(slot, hotkey)) => {
+                self.recording = None;
+                self.set_hotkey(action, slot, hotkey);
+            }
+            Some(HotkeyEvent::Remove(slot)) => {
+                self.hotkey_msg = None;
+                self.save(|s| {
+                    s.remove_hotkey(action, slot);
+                    Ok(())
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// Название приложения для списка: встроенный список, запущенные, система; иначе — id.
+    fn app_title(&mut self, app: &AppId) -> String {
+        if let Some(name) = self.settings.builtin_name(app) {
+            return name.to_owned();
+        }
+        if let Some((_, name)) = self.running.iter().find(|(id, _)| id == app) {
+            return name.clone();
+        }
+        let backend = self.host.backend.clone();
+        self.names
+            .entry(app.clone())
+            .or_insert_with(|| backend.and_then(|b| b.app_name(app)))
+            .clone()
+            .unwrap_or_else(|| app.0.clone())
+    }
+
+    fn add_app(&mut self, id: String) {
+        match self.edit(|s| s.add_app(&id).map_err(|e| e.to_string())) {
+            Ok(()) => {
+                self.app_input.clear();
+                self.app_msg = None;
+            }
+            Err(e) => self.app_msg = Some(e),
         }
     }
 
     fn apps(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Label::new(
+                "В этих приложениях KeySwitcher не исправляет слова на лету. Горячие клавиши \
+                 работают везде.",
+            )
+            .wrap_mode(TextWrapMode::Wrap),
+        );
+        ui.add_space(12.0);
         ui.strong("Свои исключения");
+        ui.add_space(4.0);
         let own = self.settings.config().apps.disabled.clone();
         if own.is_empty() {
             ui.weak(EMPTY_APPS);
+            ui.add_space(4.0);
         }
         let mut removed: Option<AppId> = None;
         for app in &own {
-            ui.horizontal(|ui| {
-                ui.monospace(&app.0);
-                if ui.button("Удалить").clicked() {
-                    removed = Some(app.clone());
-                }
-            });
+            let title = self.app_title(app);
+            let subtitle = (title != app.0).then_some(app.0.as_str());
+            if Self::list_row(ui, &title, subtitle) {
+                removed = Some(app.clone());
+            }
         }
         if let Some(app) = removed {
             self.save(move |s| {
@@ -343,63 +576,158 @@ impl Window {
                 Ok(())
             });
         }
-        let mut add = false;
+
+        let candidates: Vec<(AppId, String)> = self
+            .running
+            .iter()
+            .filter(|(id, _)| {
+                !self
+                    .settings
+                    .config()
+                    .apps
+                    .excludes(id, self.settings.builtin())
+            })
+            .cloned()
+            .collect();
+        let mut chosen: Option<AppId> = None;
         ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.app_input)
-                    .hint_text("идентификатор, например com.apple.TextEdit"),
-            );
-            add = ui.button("Добавить").clicked();
-        });
-        if add {
-            let id = self.app_input.clone();
-            match self.edit(|s| s.add_app(&id).map_err(|e| e.to_string())) {
-                Ok(()) => {
-                    self.app_input.clear();
-                    self.app_msg = None;
+            if !self.running.is_empty() {
+                egui::ComboBox::from_id_salt("add-app")
+                    .selected_text("Добавить запущенное приложение…")
+                    .width(260.0)
+                    .show_ui(ui, |ui| {
+                        if candidates.is_empty() {
+                            ui.weak("Все запущенные приложения уже в исключениях");
+                        }
+                        for (id, name) in &candidates {
+                            if ui
+                                .selectable_label(false, name)
+                                .on_hover_text(&id.0)
+                                .clicked()
+                            {
+                                chosen = Some(id.clone());
+                            }
+                        }
+                    });
+                let toggle = if self.manual_app {
+                    "Скрыть ввод вручную"
+                } else {
+                    "Ввести идентификатор…"
+                };
+                if ui.small_button(toggle).clicked() {
+                    self.manual_app = !self.manual_app;
                 }
-                Err(e) => self.app_msg = Some(e),
+            }
+        });
+        if let Some(id) = chosen {
+            self.add_app(id.0);
+        }
+        if self.manual_app {
+            let hint = if cfg!(target_os = "macos") {
+                "bundle id, например com.apple.TextEdit"
+            } else if cfg!(windows) {
+                "имя exe, например notepad.exe"
+            } else {
+                "app_id или WM_CLASS, например org.gnome.TextEditor"
+            };
+            let mut add = false;
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.app_input)
+                        .hint_text(hint)
+                        .desired_width(260.0),
+                );
+                add = ui.button("Добавить").clicked()
+                    || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            });
+            if add {
+                self.add_app(self.app_input.clone());
             }
         }
         Self::error_line(ui, &self.app_msg);
 
-        ui.add_space(14.0);
+        ui.add_space(16.0);
         ui.strong("Встроенный список");
-        ui.weak(
-            "Здесь автоматика выключена по умолчанию: терминалы, IDE, менеджеры паролей. \
-             Флажок «включить здесь» возвращает автоисправление.",
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Отмечено — автоисправление здесь выключено, так по умолчанию. Снимите флажок, \
+                     чтобы KeySwitcher работал в приложении.",
+                )
+                .weak(),
+            )
+            .wrap_mode(TextWrapMode::Wrap),
         );
-        let mut toggled: Option<(AppId, bool)> = None;
-        for app in self.settings.builtin() {
-            let mut on = self.settings.builtin_enabled(app);
-            if ui
-                .checkbox(&mut on, format!("{} — включить здесь", app.0))
-                .changed()
-            {
-                toggled = Some((app.clone(), on));
-            }
+        ui.add_space(4.0);
+        let rows = self.settings.builtin_rows();
+        let mut toggled: Option<(BuiltinRow, bool)> = None;
+        let mut categories: Vec<AppCategory> = rows.iter().map(|r| r.category).collect();
+        categories.dedup();
+        for category in categories {
+            let in_category: Vec<&BuiltinRow> =
+                rows.iter().filter(|r| r.category == category).collect();
+            egui::CollapsingHeader::new(category_title(category))
+                .id_salt(("builtin", category_title(category)))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for row in in_category {
+                        let state = self.settings.exclusion(row);
+                        let mut excluded = state == Exclusion::All;
+                        let ids = row
+                            .ids
+                            .iter()
+                            .map(|id| id.0.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let check = ui
+                            .add(
+                                egui::Checkbox::new(&mut excluded, row.title)
+                                    .indeterminate(state == Exclusion::Partly),
+                            )
+                            .on_hover_text(ids);
+                        if check.changed() {
+                            toggled = Some((row.clone(), excluded));
+                        }
+                        if !row.members.is_empty() {
+                            ui.indent(("members", row.title), |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(row.members.join(", ")).small().weak(),
+                                    )
+                                    .wrap_mode(TextWrapMode::Wrap),
+                                );
+                            });
+                        }
+                    }
+                });
         }
-        if let Some((app, on)) = toggled {
+        if let Some((row, excluded)) = toggled {
             self.save(move |s| {
-                s.set_builtin_enabled(&app, on);
+                s.set_excluded(&row, excluded);
                 Ok(())
             });
         }
     }
 
     fn words(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Label::new(
+                "Эти слова KeySwitcher не исправляет никогда. Слово из одной-двух букв \
+                 добавить нельзя: короткие слова решаются по соседним.",
+            )
+            .wrap_mode(TextWrapMode::Wrap),
+        );
+        ui.add_space(12.0);
         let words = self.settings.config().words.never.clone();
         if words.is_empty() {
             ui.weak(EMPTY_WORDS);
+            ui.add_space(4.0);
         }
         let mut removed: Option<String> = None;
         for word in &words {
-            ui.horizontal(|ui| {
-                ui.monospace(word);
-                if ui.button("Удалить").clicked() {
-                    removed = Some(word.clone());
-                }
-            });
+            if Self::list_row(ui, word, None) {
+                removed = Some(word.clone());
+            }
         }
         if let Some(word) = removed {
             self.save(move |s| {
@@ -409,8 +737,13 @@ impl Window {
         }
         let mut add = false;
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.word_input).hint_text("слово"));
-            add = ui.button("Добавить").clicked();
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.word_input)
+                    .hint_text("слово")
+                    .desired_width(260.0),
+            );
+            add = ui.button("Добавить").clicked()
+                || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         });
         if add {
             let word = self.word_input.clone();
@@ -523,22 +856,34 @@ impl Window {
 impl eframe::App for Window {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(debug_assertions)]
+        if let Some(shot) = &mut self.shot {
+            shot.frame(&ctx);
+        }
         self.poll(&ctx);
         ctx.request_repaint_after(POLL);
         self.record(&ctx);
-        egui::Panel::left("sections").show(ui, |ui| {
-            ui.add_space(8.0);
-            for s in visible_sections() {
-                if ui.selectable_label(self.section == s, s.title()).clicked() {
-                    self.section = s;
-                    self.recording = None;
+        egui::Panel::left("sections")
+            .resizable(false)
+            .exact_size(190.0)
+            .show(ui, |ui| {
+                ui.add_space(10.0);
+                for s in visible_sections() {
+                    let mut title = RichText::new(s.title());
+                    if s == Section::Permissions && self.permissions.iter().any(|p| !p.granted) {
+                        title = title.color(ui.visuals().warn_fg_color);
+                    }
+                    let item = egui::Button::selectable(self.section == s, title)
+                        .min_size(vec2(ui.available_width(), ROW_H));
+                    if ui.add(item).clicked() {
+                        self.go(s);
+                    }
                 }
-            }
-        });
+            });
         egui::CentralPanel::default().show(ui, |ui| {
             self.banner(ui);
             ui.heading(self.section.title());
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {

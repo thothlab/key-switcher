@@ -8,6 +8,8 @@ pub mod fonts;
 pub mod instance;
 pub mod model;
 pub mod record;
+#[cfg(debug_assertions)]
+mod shot;
 mod window;
 
 pub use window::{EMPTY_APPS, EMPTY_WORDS};
@@ -16,7 +18,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ks_core::AppId;
+use ks_core::BuiltinApp;
 use ks_platform::Backend;
 
 /// Раздел окна (`--section <имя>`).
@@ -83,7 +85,7 @@ impl FromStr for Section {
 #[derive(Default)]
 pub struct Host {
     pub backend: Option<Arc<dyn Backend>>,
-    pub builtin: Vec<AppId>,
+    pub builtin: Vec<BuiltinApp>,
     pub restart: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
 }
 

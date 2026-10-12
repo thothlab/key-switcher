@@ -1,7 +1,8 @@
 //! Запись сочетания нажатием: события egui → `Hotkey`. Клавиша берётся по физическому положению
 //! (`physical_key`), поэтому записанное не зависит от раскладки. Сочетание из одних модификаторов
 //! (⌥⇧) записывается при отпускании, если их было не меньше двух. Pause egui не видит, а у F-клавиш
-//! нет имени в `PhysicalKey`: Pause, Shift+Pause и жесты Shift выбираются из списка.
+//! нет имени в `PhysicalKey`: Pause, Shift+Pause и жесты Shift выбираются из списка, как и
+//! сочетания, которые раньше окна забирает система (⌘Пробел — Spotlight).
 
 use eframe::egui::{self, Event, Key};
 use ks_core::{Hotkey, Modifiers, PhysicalKey};
@@ -173,27 +174,53 @@ pub fn physical_of(key: Key) -> Option<PhysicalKey> {
     letters.into_iter().find(|(k, _)| *k == key).map(|(_, p)| p)
 }
 
-/// Подпись сочетания в окне: «Ctrl+Option+K», «двойной Shift», «Shift+Pause».
+/// Подпись сочетания в окне, как в Punto Switcher: «Cmd + Option + Shift», «Cmd + Пробел»,
+/// «Двойной Shift».
 pub fn label(h: &Hotkey) -> String {
     match h {
-        Hotkey::DoubleShift => "двойной Shift".to_owned(),
-        Hotkey::BothShifts => "оба Shift".to_owned(),
-        Hotkey::Combo { .. } => h
-            .to_string()
-            .split('+')
-            .map(|part| match part {
-                "Alt" if cfg!(target_os = "macos") => "Option".to_owned(),
-                "Meta" if cfg!(target_os = "macos") => "Cmd".to_owned(),
-                "Meta" => "Win".to_owned(),
-                p => p
-                    .strip_prefix("Key")
-                    .or_else(|| p.strip_prefix("Digit"))
-                    .unwrap_or(p)
-                    .to_owned(),
-            })
-            .collect::<Vec<_>>()
-            .join("+"),
+        Hotkey::DoubleShift => "Двойной Shift".to_owned(),
+        Hotkey::BothShifts => "Оба Shift".to_owned(),
+        Hotkey::Combo { .. } => {
+            // Cmd/Win первым, как в Punto: «Cmd + Option + Shift»
+            let printed = h.to_string();
+            let mut parts: Vec<&str> = printed.split('+').collect();
+            parts.sort_by_key(|p| *p != "Meta");
+            parts
+                .into_iter()
+                .map(part_label)
+                .collect::<Vec<_>>()
+                .join(" + ")
+        }
     }
+}
+
+fn part_label(part: &str) -> String {
+    let shown = match part {
+        "Alt" if cfg!(target_os = "macos") => "Option",
+        "Meta" if cfg!(target_os = "macos") => "Cmd",
+        "Meta" => "Win",
+        "Space" => "Пробел",
+        "Backquote" => "`",
+        "Minus" => "-",
+        "Equal" => "=",
+        "BracketLeft" => "[",
+        "BracketRight" => "]",
+        "Backslash" => "\\",
+        "Semicolon" => ";",
+        "Quote" => "'",
+        "Comma" => ",",
+        "Period" => ".",
+        "Slash" => "/",
+        "ArrowLeft" => "←",
+        "ArrowRight" => "→",
+        "ArrowUp" => "↑",
+        "ArrowDown" => "↓",
+        p => p
+            .strip_prefix("Key")
+            .or_else(|| p.strip_prefix("Digit"))
+            .unwrap_or(p),
+    };
+    shown.to_owned()
 }
 
 /// Жесты, которые выбираются из списка, а не записываются нажатием.
@@ -202,4 +229,15 @@ pub fn gestures() -> Vec<Hotkey> {
         .into_iter()
         .filter_map(|s| s.parse().ok())
         .collect()
+}
+
+/// Готовые сочетания, которые окно нажатием не получит: их раньше забирает система
+/// (⌘Пробел — Spotlight, ⌃Пробел — смена источника ввода на macOS; Win+Пробел на Windows).
+pub fn presets() -> Vec<Hotkey> {
+    let list: &[&str] = if cfg!(target_os = "macos") {
+        &["Meta+Space", "Ctrl+Space", "Meta+Alt+Shift", "Alt+Shift"]
+    } else {
+        &["Meta+Space", "Ctrl+Shift", "Alt+Shift"]
+    };
+    list.iter().filter_map(|s| s.parse().ok()).collect()
 }

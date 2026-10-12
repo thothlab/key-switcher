@@ -6,12 +6,12 @@
 use std::path::Path;
 
 use ks_core::{
-    AppId, Config, ConfigError, Hotkey, HotkeyConfig, HotkeyError, Os, WordRules,
-    config::MAX_PER_ACTION, validate_hotkeys,
+    AppCategory, AppId, BuiltinApp, Config, ConfigError, Hotkey, HotkeyConfig, HotkeyError, Os,
+    WordRules, config::MAX_PER_ACTION, validate_hotkeys,
 };
 
 /// Действие с горячими клавишами — строка раздела «Горячие клавиши».
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HotkeyAction {
     UndoOrConvertSelection,
     SwitchLayout,
@@ -21,23 +21,26 @@ pub enum HotkeyAction {
 }
 
 impl HotkeyAction {
+    /// Порядок строк окна: сначала действия Punto Switcher, потом жесты Caramba.
     pub const ALL: [HotkeyAction; 5] = [
         HotkeyAction::UndoOrConvertSelection,
+        HotkeyAction::ToggleAutocorrect,
         HotkeyAction::SwitchLayout,
         HotkeyAction::UndoOrConvertWord,
         HotkeyAction::ConvertSelection,
-        HotkeyAction::ToggleAutocorrect,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             HotkeyAction::UndoOrConvertSelection => {
-                "Отменить конвертацию или сменить раскладку выделенного текста"
+                "Отменить конвертацию раскладки или сменить раскладку выделенного текста"
             }
+            HotkeyAction::ToggleAutocorrect => "Включить/выключить автопереключение",
             HotkeyAction::SwitchLayout => "Сменить раскладку",
-            HotkeyAction::UndoOrConvertWord => "Отменить исправление / конвертировать слово",
-            HotkeyAction::ConvertSelection => "Конвертировать выделение",
-            HotkeyAction::ToggleAutocorrect => "Вкл/выкл автоматики",
+            HotkeyAction::UndoOrConvertWord => {
+                "Отменить исправление или сменить раскладку последнего слова"
+            }
+            HotkeyAction::ConvertSelection => "Сменить раскладку выделенного текста",
         }
     }
 
@@ -84,16 +87,69 @@ pub enum AppError {
     Empty,
 }
 
+/// Строка встроенного списка в окне: одно приложение или семейство («JetBrains IDE и Android
+/// Studio») — все его идентификаторы разом. Издания с одним названием (IntelliJ IDEA и
+/// IntelliJ IDEA CE) — тоже одна строка.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinRow {
+    pub category: AppCategory,
+    /// Название приложения или семейства.
+    pub title: &'static str,
+    /// Названия приложений семейства без повторов; пусто — строка и есть приложение.
+    pub members: Vec<&'static str>,
+    pub ids: Vec<AppId>,
+}
+
+/// Строки встроенного списка по категориям, внутри категории — в порядке списка.
+pub fn builtin_rows(apps: &[BuiltinApp]) -> Vec<BuiltinRow> {
+    let mut rows: Vec<BuiltinRow> = Vec::new();
+    for app in apps {
+        let title = app.family.unwrap_or(app.name);
+        match rows
+            .iter_mut()
+            .find(|r| r.category == app.category && r.title == title)
+        {
+            Some(row) => {
+                row.ids.push(app.id.clone());
+                if app.family.is_some() && !row.members.contains(&app.name) {
+                    row.members.push(app.name);
+                }
+            }
+            None => rows.push(BuiltinRow {
+                category: app.category,
+                title,
+                members: app.family.map(|_| app.name).into_iter().collect(),
+                ids: vec![app.id.clone()],
+            }),
+        }
+    }
+    rows.sort_by_key(|r| r.category);
+    rows
+}
+
+/// Исключена ли строка встроенного списка: семейство может быть исключено частично — меню
+/// «Не исправлять в …» переключает одно приложение.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exclusion {
+    /// Автоматика выключена во всех приложениях строки (как по умолчанию).
+    All,
+    /// Включена в части приложений.
+    Partly,
+    /// Пользователь вернул автоматику во всех приложениях строки.
+    None,
+}
+
 pub struct Settings {
     config: Config,
     /// Файл настроек не прочитан (текст без значений из файла): править нельзя.
     error: Option<String>,
-    builtin: Vec<AppId>,
+    builtin: Vec<BuiltinApp>,
+    builtin_ids: Vec<AppId>,
 }
 
 impl Settings {
-    /// `builtin` — встроенный список приложений без автоматики (`Lexicon`).
-    pub fn new(loaded: Result<Config, ConfigError>, builtin: Vec<AppId>) -> Settings {
+    /// `builtin` — встроенный список приложений без автоматики (`Lexicon::builtin_apps`).
+    pub fn new(loaded: Result<Config, ConfigError>, builtin: Vec<BuiltinApp>) -> Settings {
         let (config, error) = match loaded {
             Ok(config) => (config, None),
             Err(e) => (Config::default_for(Os::current()), Some(e.to_string())),
@@ -101,11 +157,12 @@ impl Settings {
         Settings {
             config,
             error,
+            builtin_ids: builtin.iter().map(|a| a.id.clone()).collect(),
             builtin,
         }
     }
 
-    pub fn load(path: &Path, builtin: Vec<AppId>) -> Settings {
+    pub fn load(path: &Path, builtin: Vec<BuiltinApp>) -> Settings {
         Settings::new(Config::load(path), builtin)
     }
 
@@ -124,7 +181,16 @@ impl Settings {
     }
 
     pub fn builtin(&self) -> &[AppId] {
-        &self.builtin
+        &self.builtin_ids
+    }
+
+    pub fn builtin_rows(&self) -> Vec<BuiltinRow> {
+        builtin_rows(&self.builtin)
+    }
+
+    /// Название приложения из встроенного списка.
+    pub fn builtin_name(&self, app: &AppId) -> Option<&'static str> {
+        self.builtin.iter().find(|a| a.id == *app).map(|a| a.name)
     }
 
     /// Перечитывает файл: окно видит правки агента (команды меню). Битый файл — ошибка,
@@ -214,6 +280,25 @@ impl Settings {
         }
     }
 
+    /// Флажок действия снят: все назначения убираются, прежние возвращаются вызывающему.
+    pub fn clear_hotkeys(&mut self, action: HotkeyAction) -> Vec<Hotkey> {
+        std::mem::take(action.of_mut(&mut self.config.hotkeys))
+    }
+
+    /// Флажок поставлен снова: прежние назначения возвращаются целиком. Сочетание успели отдать
+    /// другому действию — ошибка, назначения не меняются.
+    pub fn restore_hotkeys(
+        &mut self,
+        action: HotkeyAction,
+        hotkeys: Vec<Hotkey>,
+    ) -> Result<(), HotkeyError> {
+        let mut candidate = self.config.hotkeys.clone();
+        *action.of_mut(&mut candidate) = hotkeys;
+        validate_hotkeys(&candidate)?;
+        self.config.hotkeys = candidate;
+        Ok(())
+    }
+
     pub fn add_word(&mut self, word: &str) -> Result<(), WordError> {
         let word = word.trim();
         if word.is_empty() {
@@ -246,6 +331,22 @@ impl Settings {
         enabled.retain(|a| a != app);
         if on {
             enabled.push(app.clone());
+        }
+    }
+
+    pub fn exclusion(&self, row: &BuiltinRow) -> Exclusion {
+        let enabled = row.ids.iter().filter(|id| self.builtin_enabled(id)).count();
+        match enabled {
+            0 => Exclusion::All,
+            n if n == row.ids.len() => Exclusion::None,
+            _ => Exclusion::Partly,
+        }
+    }
+
+    /// Флажок строки: `true` — автоматика выключена во всех приложениях строки.
+    pub fn set_excluded(&mut self, row: &BuiltinRow, excluded: bool) {
+        for id in &row.ids {
+            self.set_builtin_enabled(id, !excluded);
         }
     }
 

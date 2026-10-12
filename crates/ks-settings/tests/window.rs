@@ -110,6 +110,7 @@ fn window_fonts_have_every_glyph_the_window_shows() {
         ks_settings::EMPTY_WORDS,
         hint,
         "Слова-исключения: Ёё ЖЩЪ „Не исправлять …“ — RU↔EN «Общие»",
+        "Нажмите сочетание… ▾ ← → ↑ ↓ ` \\ ' Cmd + Пробел",
     ];
     texts.extend(ks_settings::about::NOTICES.iter().map(|(_, text)| *text));
     for font in [

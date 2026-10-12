@@ -176,9 +176,7 @@ fn settings(args: &[String]) -> ExitCode {
     };
     let host = Host {
         backend: Some(backend()),
-        builtin: ks_core::Lexicon::embedded()
-            .default_excluded_apps()
-            .to_vec(),
+        builtin: ks_core::Lexicon::embedded().builtin_apps().to_vec(),
         restart: Some(Arc::new(restart_agent)),
     };
     match ks_settings::run_with(section, &path, host) {
