@@ -38,6 +38,7 @@ data/                сгенерированные словари и модел
 scripts/             сборка .app и локальный сертификат (macos), build.sh (windows, linux), udev-правило (linux)
 packaging/           заметки к релизу и README внутри .dmg/.zip/.tar.gz (CI берёт их отсюда)
 docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
+design/              бриф дизайнеру (prompt.md: окно настроек, иконки приложения и трея), снимки текущего окна; сюда же ложится сдача
 ```
 
 ## Архитектура
