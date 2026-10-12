@@ -1,0 +1,138 @@
+# Релизная сборка KeySwitcher для установки: macOS (universal .dmg), Windows (x86_64 .zip),
+# Linux (x86_64 .tar.gz, glibc >= 2.31). Тег vX.Y.Z (версия из Cargo.toml) — сборка и
+# предварительный релиз на GitHub; запуск вручную (Actions → «Релизная сборка» → Run workflow) —
+# только артефакты прогона, без релиза.
+name: Релизная сборка
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (arm64 + x86_64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # Без KS_SIGN_IDENTITY — подпись ad-hoc: Developer ID и нотаризации пока нет.
+      - name: Сборка KeySwitcher.app
+        run: KS_UNIVERSAL=1 sh scripts/macos/build-app.sh
+      - name: Проверка бандла
+        run: |
+          lipo -archs dist/KeySwitcher.app/Contents/MacOS/keyswitcher
+          codesign --verify --deep --strict dist/KeySwitcher.app
+          dist/KeySwitcher.app/Contents/MacOS/keyswitcher --version
+      - name: DMG
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p pkg/dmg/Лицензии
+          ditto dist/KeySwitcher.app pkg/dmg/KeySwitcher.app
+          ln -s /Applications pkg/dmg/Applications
+          cp packaging/README-macos.txt "pkg/dmg/Как установить.txt"
+          cp THIRD_PARTY.md data/licenses/* pkg/dmg/Лицензии/
+          DMG="pkg/KeySwitcher-$VERSION-macos-universal.dmg"
+          # hdiutil на раннерах иногда отвечает «Resource busy» — повтор
+          for i in 1 2 3; do
+            hdiutil create -volname KeySwitcher -srcfolder pkg/dmg -ov -format UDZO "$DMG" && break
+            sleep 5
+          done
+          test -s "$DMG"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: pkg/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Сборка keyswitcher.exe
+        run: sh scripts/windows/build.sh
+      - name: ZIP
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          # имена внутри архива латиницей: Проводник Windows путает кириллицу в zip из Linux
+          mkdir -p pkg/KeySwitcher/licenses
+          cp dist/windows/keyswitcher.exe pkg/KeySwitcher/
+          cp packaging/README-windows.txt pkg/KeySwitcher/README.txt
+          cp THIRD_PARTY.md data/licenses/* pkg/KeySwitcher/licenses/
+          (cd pkg && zip -r "KeySwitcher-$VERSION-windows-x86_64.zip" KeySwitcher)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: pkg/*.zip
+          if-no-files-found: error
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Сборка keyswitcher
+        run: sh scripts/linux/build.sh
+      - name: TAR.GZ
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p pkg/KeySwitcher/licenses
+          cp dist/linux/keyswitcher dist/linux/install-udev-rule.sh pkg/KeySwitcher/
+          cp packaging/README-linux.txt pkg/KeySwitcher/README.txt
+          cp THIRD_PARTY.md data/licenses/* pkg/KeySwitcher/licenses/
+          tar -C pkg -czf "pkg/KeySwitcher-$VERSION-linux-x86_64.tar.gz" KeySwitcher
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: pkg/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Релиз на GitHub
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Тег совпадает с версией в Cargo.toml
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "${GITHUB_REF_NAME#v}" = "$VERSION" || {
+            echo "тег $GITHUB_REF_NAME, а в Cargo.toml $VERSION" >&2; exit 1; }
+          sed "s/{{VERSION}}/$VERSION/g" packaging/RELEASE_NOTES.md > notes.md
+      - uses: actions/download-artifact@v8
+        with:
+          path: pkg
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: KeySwitcher ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: true
+          files: pkg/*/*
+          fail_on_unmatched_files: true
