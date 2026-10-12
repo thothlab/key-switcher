@@ -25,6 +25,8 @@ pub const REPLACE_RESERVE_MS: u64 = SWITCH_TIMEOUT_MS + 300;
 pub const COPY_TIMEOUT_MS: u64 = 300;
 /// Шаг опроса буфера обмена после копирования.
 pub const COPY_POLL_MS: u64 = 10;
+/// После `COPY_TIMEOUT_MS` ещё столько ждём опоздавшее копирование, чтобы вернуть буфер.
+pub const LATE_COPY_MS: u64 = 500;
 /// Пауза после вставки перед восстановлением буфера обмена: приложение должно успеть
 /// прочитать вставляемое.
 pub const RESTORE_DELAY_MS: u64 = 250;
@@ -271,6 +273,21 @@ impl<N> Executor<N> {
         let mut waited = 0;
         while clip.change_count() == before {
             if waited >= COPY_TIMEOUT_MS {
+                // Медленное приложение могло выполнить Cmd+C позже срока: тогда выделение
+                // заменило бы буфер пользователя навсегда. Ждём ещё немного и, если копия
+                // всё же пришла, возвращаем прежнее содержимое — замена не делается.
+                if lease.reserve(LATE_COPY_MS) {
+                    let mut late = 0;
+                    while late < LATE_COPY_MS && lease.alive() {
+                        self.poster.pause_ms(COPY_POLL_MS);
+                        late += COPY_POLL_MS;
+                        if clip.change_count() != before {
+                            clip.restore(&saved);
+                            log::info!("копирование опоздало: буфер обмена восстановлен");
+                            return Ok(());
+                        }
+                    }
+                }
                 log::info!("выделение пусто: конвертировать нечего");
                 return Ok(());
             }

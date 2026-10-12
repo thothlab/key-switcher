@@ -238,6 +238,10 @@ struct Clip {
     text: Option<String>,
     /// Что выделено в поле; `None` — пусто, Cmd+C буфер не трогает.
     selection: Option<String>,
+    /// Медленное приложение: копия ложится в буфер только через столько пауз исполнителя.
+    late: Option<u32>,
+    /// Копия, ещё не легшая в буфер (медленное приложение).
+    pending: Option<String>,
 }
 
 impl Desk {
@@ -246,6 +250,14 @@ impl Desk {
     }
     fn lines(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
+    }
+    /// Медленное приложение всё-таки доделало копирование — уже после исполнителя.
+    fn finish_late_copy(&self) {
+        let mut clip = self.clip.lock().unwrap();
+        if let Some(text) = clip.pending.take() {
+            clip.text = Some(text);
+            clip.count += 1;
+        }
     }
 }
 
@@ -264,8 +276,12 @@ impl Poster<Native> for Desk {
             Chord::Copy => {
                 self.push("copy".to_owned());
                 if let Some(sel) = clip.selection.clone() {
-                    clip.count += 1;
-                    clip.text = Some(sel);
+                    if clip.late.is_some() {
+                        clip.pending = Some(sel);
+                    } else {
+                        clip.count += 1;
+                        clip.text = Some(sel);
+                    }
                 }
             }
             Chord::Paste => self.push(format!("paste:{}", clip.text.clone().unwrap_or_default())),
@@ -278,7 +294,20 @@ impl Poster<Native> for Desk {
         let dir = if native.down { "down" } else { "up" };
         self.push(format!("replay:{}:{dir}", native.key));
     }
-    fn pause_ms(&self, _ms: u64) {}
+    fn pause_ms(&self, _ms: u64) {
+        let mut clip = self.clip.lock().unwrap();
+        if clip.pending.is_none() {
+            return;
+        }
+        match clip.late {
+            Some(0) | None => {
+                clip.late = None;
+                clip.text = clip.pending.take();
+                clip.count += 1;
+            }
+            Some(n) => clip.late = Some(n - 1),
+        }
+    }
 }
 
 impl Clipboard for Desk {
@@ -669,6 +698,15 @@ fn late_replacement_keeps_enough_deadline_to_type_its_unicode_fallback() {
 }
 
 fn selection_run(app: &'static str, selection: Option<&str>) -> (Arc<FakeHandler>, Arc<Desk>) {
+    selection_run_late(app, selection, None)
+}
+
+/// То же, но приложение кладёт копию в буфер только через `late` пауз исполнителя.
+fn selection_run_late(
+    app: &'static str,
+    selection: Option<&str>,
+    late: Option<u32>,
+) -> (Arc<FakeHandler>, Arc<Desk>) {
     let t = tap_in(true, app);
     let hotkey = event(InputKind::Key, K::Pause, KeyDir::Down, 0);
     assert_eq!(
@@ -684,6 +722,7 @@ fn selection_run(app: &'static str, selection: Option<&str>) -> (Arc<FakeHandler
         let mut clip = desk.clip.lock().unwrap();
         clip.text = Some("старое".to_owned());
         clip.selection = selection.map(str::to_owned);
+        clip.late = late;
     }
     pipeline(&t, exec).run(job);
     assert!(!t.shared.busy());
@@ -716,4 +755,19 @@ fn selection_in_terminal_is_left_alone() {
     let (_, desk) = selection_run("com.apple.Terminal", Some("ghbdtn"));
     assert!(desk.lines().is_empty(), "ни копирования, ни вставки");
     assert_eq!(desk.text().as_deref(), Some("старое"));
+}
+
+#[test]
+fn late_copy_from_a_slow_app_does_not_replace_the_users_clipboard() {
+    // Cmd+C выполнен позже COPY_TIMEOUT_MS (30 опросов): без восстановления выделение
+    // навсегда заменило бы буфер пользователя
+    let (handler, desk) = selection_run_late(TEXTEDIT, Some("ghbdtn"), Some(40));
+    desk.finish_late_copy();
+    assert!(handler.converted.lock().unwrap().is_empty(), "замены нет");
+    assert_eq!(desk.lines(), ["copy"], "вставки нет");
+    assert_eq!(
+        desk.text().as_deref(),
+        Some("старое"),
+        "опоздавшая копия не заменила буфер пользователя"
+    );
 }
