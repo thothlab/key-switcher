@@ -79,6 +79,11 @@ impl Engine {
             }
         }
         if let Some(disposition) = step.consumed {
+            if ev.dir == KeyDir::Down && !ev.key.is_modifier() {
+                // хоткей посреди слова (⌃⌥K, Shift+Pause) прерывает его, как любое сочетание
+                // с Cmd/Ctrl/Alt: остаток не должен решаться вместе с началом
+                self.buffer.clear();
+            }
             return Outcome {
                 disposition,
                 actions: step.actions,

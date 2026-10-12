@@ -481,3 +481,53 @@ fn click_after_single_shift_cancels_the_pending_switch() {
     assert_eq!(e.next_deadline(), None);
     assert_eq!(e.tick(LATER), vec![], "Shift с кликом не переключает");
 }
+
+#[test]
+fn lost_shift_release_does_not_turn_into_both_shifts() {
+    // Отпускание левого Shift ушло мимо движка (безопасный ввод, отключённый перехват);
+    // буква без флага Shift доказывает, что Shift отпущен, и касание правого Shift —
+    // одиночное касание, а не «оба Shift»
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine(vec![us.clone(), ru.clone()]);
+    let c = ctx(&us);
+    key_at(&mut e, &c, K::ShiftLeft, KeyDir::Down, shift(), 1_000);
+    press_at(&mut e, &c, K::KeyA, Modifiers::default(), 2_000);
+    let out = shift_tap(&mut e, &c, K::ShiftRight, 3_000);
+    assert!(
+        !actions(&out).contains(&Action::ToggleAutocorrect),
+        "касание правого Shift после потерянного отпускания выключило автоматику"
+    );
+}
+
+#[test]
+fn hotkey_in_the_middle_of_a_word_interrupts_it() {
+    let (us, ru) = (us(), ru_pc());
+    let mut cfg = config();
+    cfg.hotkeys.convert_selection = vec!["Ctrl+Alt+KeyK".parse().unwrap()];
+    let mut e = engine_with(cfg, vec![us.clone(), ru.clone()]);
+    let c = ctx(&us);
+    type_text(&mut e, &c, &us, "ghbd");
+    let chord = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    key_at(&mut e, &c, K::ControlLeft, KeyDir::Down, chord, 10);
+    key_at(&mut e, &c, K::AltLeft, KeyDir::Down, chord, 20);
+    press_at(&mut e, &c, K::KeyK, chord, 30);
+    key_at(&mut e, &c, K::AltLeft, KeyDir::Up, Modifiers::default(), 90);
+    key_at(
+        &mut e,
+        &c,
+        K::ControlLeft,
+        KeyDir::Up,
+        Modifiers::default(),
+        100,
+    );
+    type_text(&mut e, &c, &us, "tn");
+    assert_eq!(
+        space(&mut e, &c),
+        Outcome::pass(),
+        "остаток слова после хоткея решён вместе с началом"
+    );
+}

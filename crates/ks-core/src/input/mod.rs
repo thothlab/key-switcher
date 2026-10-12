@@ -131,6 +131,9 @@ impl InputState {
             self.queued_undo = None;
         }
         let is_shift = matches!(ev.key, PhysicalKey::ShiftLeft | PhysicalKey::ShiftRight);
+        if !is_shift && ev.dir == KeyDir::Down && !ev.key.is_modifier() {
+            self.reconcile_shift(ev.mods.shift);
+        }
         match (ev.dir, is_shift) {
             (KeyDir::Down, true) => self.shift_down(ev, view, &mut step),
             (KeyDir::Up, true) => self.shift_up(ev, ctx, view, &mut step),
@@ -379,6 +382,21 @@ impl InputState {
                 Some(word) => self.undo(word, view.layouts, step),
                 None => self.finished = None,
             }
+        }
+    }
+
+    /// Отпускание Shift могло уйти мимо движка (безопасный ввод, отключённый перехват).
+    /// Обычная клавиша без флага Shift — доказательство, что Shift отпущен: иначе следующее
+    /// касание другого Shift засчиталось бы как «оба Shift» и выключило автоматику.
+    fn reconcile_shift(&mut self, shift_flag: bool) {
+        if shift_flag || self.held & SHIFTS == 0 {
+            return;
+        }
+        self.held &= !SHIFTS;
+        self.both = false;
+        self.tap = None;
+        if self.held == 0 {
+            self.chord = None;
         }
     }
 
