@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+<linearGradient id="body" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4D68F0"/><stop offset="1" stop-color="#2B3DB5"/></linearGradient>
+<linearGradient id="face" x1="0" y1="226" x2="0" y2="762" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#E6EBFF"/></linearGradient>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#body)"/>
+<rect x="222" y="262" width="580" height="540" rx="116" fill="#1C2A8A"/>
+<rect x="222" y="226" width="580" height="536" rx="116" fill="url(#face)"/>
+<path d="M488.2 324L535.8 324L535.8 664L488.2 664ZM512 324L512 507.6L450.8 507.6A91.8 91.8 0 0 1 450.8 324L512 324ZM488.2 371.6L450.8 371.6A44.2 44.2 0 0 0 450.8 460L488.2 460L488.2 371.6ZM479.07 483.8L410.41 664L359 664L427.67 483.8L479.07 483.8ZM512 324L573.2 324A91.8 91.8 0 0 1 573.2 507.6L512 507.6ZM535.8 371.6L535.8 460L573.2 460A44.2 44.2 0 0 0 573.2 371.6ZM544.93 483.8L596.33 483.8L665 664L613.59 664Z" fill="#2B3DB5"/>
+</svg>
