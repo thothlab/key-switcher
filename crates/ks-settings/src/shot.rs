@@ -1,5 +1,6 @@
 //! Только для отладочной сборки: окно снимает свой кадр в BMP и закрывается —
-//! `KS_SETTINGS_SHOT=<файл.bmp> [KS_SETTINGS_SIZE=640x420] keyswitcher --settings --section …`.
+//! `KS_SETTINGS_SHOT=<файл.bmp> [KS_SETTINGS_SIZE=640x420] [KS_SETTINGS_THEME=dark]
+//! keyswitcher --settings --section …`.
 //! Так вид окна проверяется без права «Запись экрана» у терминала.
 
 use std::path::PathBuf;
@@ -25,6 +26,15 @@ impl Shot {
         let size = std::env::var("KS_SETTINGS_SIZE").ok()?;
         let (w, h) = size.split_once('x')?;
         Some([w.parse().ok()?, h.parse().ok()?])
+    }
+
+    /// Тема из `KS_SETTINGS_THEME` («light», «dark»): снять обе, не меняя тему системы.
+    pub fn theme() -> Option<egui::Theme> {
+        match std::env::var("KS_SETTINGS_THEME").ok()?.as_str() {
+            "light" => Some(egui::Theme::Light),
+            "dark" => Some(egui::Theme::Dark),
+            _ => None,
+        }
     }
 
     /// Каждый кадр: на пятом просит снимок, получив — пишет файл и закрывает окно.

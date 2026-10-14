@@ -440,8 +440,8 @@ impl Backend for MacBackend {
             PermissionStatus {
                 kind: PermissionKind::InputMonitoring,
                 granted: system::listen_allowed(),
-                explanation: "Мониторинг ввода: видеть нажатия клавиш, чтобы распознать слово, \
-                              набранное не в той раскладке."
+                explanation: "Видеть нажатия клавиш, чтобы распознать слово, набранное не в той \
+                              раскладке."
                     .to_owned(),
                 fix_hint: "Системные настройки → Конфиденциальность и безопасность → Мониторинг \
                            ввода: включите KeySwitcher и перезапустите его."
@@ -450,9 +450,10 @@ impl Backend for MacBackend {
             PermissionStatus {
                 kind: PermissionKind::Accessibility,
                 granted: post,
-                explanation: "Универсальный доступ: стереть слово и напечатать исправленное, \
-                              придержать клавишу на время замены."
-                    .to_owned(),
+                explanation:
+                    "Стереть слово и напечатать исправленное, придержать клавишу на время \
+                              замены."
+                        .to_owned(),
                 fix_hint: "Системные настройки → Конфиденциальность и безопасность → \
                            Универсальный доступ: включите KeySwitcher и перезапустите его."
                     .to_owned(),

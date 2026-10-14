@@ -1,15 +1,18 @@
 //! Окно настроек KeySwitcher (egui/eframe, отдельный процесс `keyswitcher --settings`).
 //! Окно читает и пишет только файл настроек; агент следит за файлом и применяет правки сам.
 //! Логика окна без отрисовки — [`model`], запись сочетания — [`record`], один экземпляр окна —
-//! [`instance`], шрифты — [`fonts`].
+//! [`instance`], шрифты — [`fonts`], тема — [`theme`], значки — [`icons`].
 
 pub mod about;
 pub mod fonts;
+pub mod icons;
 pub mod instance;
 pub mod model;
 pub mod record;
 #[cfg(debug_assertions)]
 mod shot;
+pub mod theme;
+mod widgets;
 mod window;
 
 pub use window::{EMPTY_APPS, EMPTY_WORDS};

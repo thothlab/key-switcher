@@ -1,11 +1,11 @@
-# ks-settings — третьи стороны
+# egui, eframe
 
-Окно настроек рисуется egui/eframe (MIT OR Apache-2.0) и использует шрифты по умолчанию egui
-(крейт `epaint_default_fonts` 0.36, лицензия «(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0»).
-Своих шрифтов KeySwitcher не встраивает: кириллица берётся из Ubuntu-Light. Стрелок в шрифтах
-egui нет, поэтому последними запасными шрифтами окно подключает системные шрифты символов, читая их
-с диска при запуске (macOS — Apple Symbols, Windows — Segoe UI Symbol, Linux — DejaVu Sans);
-в бинарник они не входят.
+Окно настроек рисуется egui/eframe (MIT OR Apache-2.0). Запасными шрифтами после Golos Text
+стоят шрифты egui по умолчанию (крейт `epaint_default_fonts` 0.36, лицензия
+«(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0»). Значков ⌘ ⌥ ⇧ ⌃ и стрелок «↔» в них нет,
+поэтому последними запасными окно подключает системные шрифты символов, читая их с диска при
+запуске (macOS — Apple Symbols, Windows — Segoe UI Symbol, Linux — DejaVu Sans); в бинарник они
+не входят.
 
 | Шрифт | Лицензия |
 |---|---|

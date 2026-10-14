@@ -33,7 +33,7 @@ impl HotkeyAction {
     pub fn label(self) -> &'static str {
         match self {
             HotkeyAction::UndoOrConvertSelection => {
-                "Отменить конвертацию раскладки или сменить раскладку выделенного текста"
+                "Отменить конвертацию или сменить раскладку выделенного текста"
             }
             HotkeyAction::ToggleAutocorrect => "Включить/выключить автопереключение",
             HotkeyAction::SwitchLayout => "Сменить раскладку",
@@ -244,6 +244,10 @@ impl Settings {
     /// Флаг в файле; запись автозапуска в системе ставит и снимает агент.
     pub fn set_autostart(&mut self, on: bool) {
         self.config.autostart = on;
+    }
+
+    pub fn set_check_updates(&mut self, on: bool) {
+        self.config.check_updates = on;
     }
 
     pub fn hotkeys(&self, action: HotkeyAction) -> &[Hotkey] {

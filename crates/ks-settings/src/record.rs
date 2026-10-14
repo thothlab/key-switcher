@@ -194,6 +194,68 @@ pub fn label(h: &Hotkey) -> String {
     }
 }
 
+/// Колпачок в поле сочетания.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cap {
+    /// Модификатор: на macOS рисуется значком (⌘ ⌥ ⇧ ⌃), на Windows и Linux — словом.
+    Mod(ModKey),
+    /// Клавиша словом: «Пробел», «Pause», «K».
+    Key(String),
+    /// Слово «дважды» после колпачка Shift — двойной Shift.
+    Twice,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModKey {
+    Meta,
+    Ctrl,
+    Alt,
+    Shift,
+}
+
+impl ModKey {
+    /// Подпись колпачка там, где модификатор пишется словом.
+    pub fn word(self) -> &'static str {
+        match self {
+            ModKey::Meta if cfg!(target_os = "macos") => "Cmd",
+            ModKey::Meta => "Win",
+            ModKey::Ctrl => "Ctrl",
+            ModKey::Alt if cfg!(target_os = "macos") => "Option",
+            ModKey::Alt => "Alt",
+            ModKey::Shift => "Shift",
+        }
+    }
+}
+
+/// Колпачки сочетания в порядке подписи: Cmd/Win, Ctrl, Alt, Shift, затем клавиша.
+pub fn caps(h: &Hotkey) -> Vec<Cap> {
+    match h {
+        Hotkey::DoubleShift => vec![Cap::Mod(ModKey::Shift), Cap::Twice],
+        Hotkey::BothShifts => vec![Cap::Mod(ModKey::Shift), Cap::Mod(ModKey::Shift)],
+        Hotkey::Combo { mods, key } => {
+            let mut out: Vec<Cap> = [
+                (mods.meta, ModKey::Meta),
+                (mods.ctrl, ModKey::Ctrl),
+                (mods.alt, ModKey::Alt),
+                (mods.shift, ModKey::Shift),
+            ]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, m)| Cap::Mod(m))
+            .collect();
+            if let Some(key) = key {
+                let printed = Hotkey::Combo {
+                    mods: Modifiers::default(),
+                    key: Some(*key),
+                }
+                .to_string();
+                out.push(Cap::Key(part_label(&printed)));
+            }
+            out
+        }
+    }
+}
+
 fn part_label(part: &str) -> String {
     let shown = match part {
         "Alt" if cfg!(target_os = "macos") => "Option",
