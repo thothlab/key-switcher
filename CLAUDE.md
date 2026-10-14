@@ -15,7 +15,7 @@
 | `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --status` | Состояние работающего агента: права, перехват, раскладки, приложение в фокусе |
 | `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --selftest` | 18 живых сценариев в собственном документе TextEdit (нужны права TCC; при чужом фокусе отказывается) |
 | `dist/KeySwitcher.app/Contents/MacOS/keyswitcher --settings` | Окно настроек; `--section hotkeys` (general, apps, words, permissions, about) — сразу на разделе |
-| `KS_SETTINGS_SHOT=/tmp/s.bmp target/debug/keyswitcher --settings --section apps` | Только отладочная сборка: окно снимает свой кадр в BMP и закрывается (`KS_SETTINGS_SIZE=640x420` — размер); `sips -s format png` — в PNG |
+| `KS_SETTINGS_SHOT=/tmp/s.bmp target/debug/keyswitcher --settings --section apps` | Только отладочная сборка: окно снимает свой кадр в BMP и закрывается (`KS_SETTINGS_SIZE=640x420` — размер, `KS_SETTINGS_THEME=dark` — тема); `sips -s format png` — в PNG. Изредка снимок не приходит — перезапустить |
 | `sh scripts/windows/build.sh` / `sh scripts/linux/build.sh` | Кросс-сборка `dist/windows/keyswitcher.exe` (mingw-w64) и `dist/linux/keyswitcher` (zig + cargo-zigbuild) |
 | `cargo run --release -p ks-eval -- --part control` | Замер качества распознавания; `--write docs/eval.md` обновляет отчёт |
 | `cargo run --release -p ks-datagen` | Перегенерировать `data/` из hunspell (сеть; Tatoeba только с `--resample-eval`) |
@@ -31,14 +31,15 @@ crates/ks-macos      CGEventTap, TIS/UCKeyTranslate, CGEventPost, NSPasteboard, 
 crates/ks-windows    WH_KEYBOARD_LL, SendInput, KLC-таблицы, ключ Run
 crates/ks-linux      evdev без захвата + uinput, смена раскладки X11/KDE/Sway/Hyprland, трей ksni, udev
 crates/ks-app        бинарник keyswitcher: агент, трей, сокет agent.sock, --status/--selftest/--settings
-crates/ks-settings   окно настроек на egui (отдельный процесс)
+crates/ks-settings   окно настроек на egui (отдельный процесс): тема и палитра (theme), значки-контуры (icons), виджеты макета (widgets); assets/ — Golos Text и иконка
+crates/ks-app/assets растры значка трея по ОС (копии design/icons/tray)
 crates/ks-eval       замер качества на Tatoeba (data/eval/, части tune/control)
 tools/ks-datagen     генератор data/ из hunspell LibreOffice
 data/                сгенерированные словари и модели (коммитятся), лицензии — data/licenses/, THIRD_PARTY.md
 scripts/             сборка .app и локальный сертификат (macos), build.sh (windows, linux), udev-правило (linux)
-packaging/           заметки к релизу и README внутри .dmg/.zip/.tar.gz (CI берёт их отсюда)
+packaging/           заметки к релизу и README внутри .dmg/.zip/.tar.gz (CI берёт их отсюда); icons/ — иконка приложения по ОС для .icns, .exe и hicolor
 docs/                build-macos.md, build-windows.md, build-linux.md, eval.md
-design/              бриф дизайнеру (prompt.md: окно настроек, иконки приложения и трея), снимки текущего окна; сюда же ложится сдача
+design/              бриф и сдача дизайна: tokens.json, screens/ (эталоны окна), icons/, key-switcher.pen (только через pencil MCP). Сборка из design/ не читает — нужные файлы скопированы в крейты и packaging/
 ```
 
 ## Архитектура
@@ -53,7 +54,7 @@ design/              бриф дизайнеру (prompt.md: окно настр
 
 ## Соглашения
 
-- Набранный текст и значения `config.toml` никогда не попадают в логи, статус и ошибки; сети в продуктовых крейтах нет.
+- Набранный текст и значения `config.toml` никогда не попадают в логи, статус и ошибки; сети в продуктовых крейтах нет, кроме проверки версии через `curl` (`ks-app/src/update.rs`, выключается `check_updates`).
 - Новый бэкенд подключается к модели `ks-platform`, а не копирует её: состояние модификаторов хранится в событии на момент захвата, `Switcher::select_layout` укладывается в `SWITCH_TIMEOUT_MS`.
 - Тест обязан падать без своей правки; тесты ядра строят движок на `common::classic()`.
 
@@ -66,7 +67,9 @@ design/              бриф дизайнеру (prompt.md: окно настр
 ## Что уже кусалось
 
 - Права TCC привязаны к подписи: собирай с сертификатом «KeySwitcher Local» (`scripts/macos/create-local-cert.sh`), иначе после каждой пересборки права молча слетают.
-- После выдачи прав агента надо перезапустить: TCC применяет их только к новому процессу.
+- После выдачи прав агента надо перезапустить: TCC применяет их только к новому процессу (на macOS 27 `AXIsProcessTrusted` в живом процессе так и остаётся `false`). Агент без прав раз в 2 с спрашивает их новым процессом `keyswitcher --permissions` и, когда выданы, перезапускается сам. Системное «Выйти и открыть снова» агента не возвращает.
+- Перезапуск — только через `open -n` (новый экземпляр запускает LaunchServices): отвязанный дочерний процесс macOS снимает вместе с приложением. Новый агент ждёт до 10 с, пока прежний освободит `agent.sock`; уходящий агент файл сокета не удаляет — иначе сотрёт сокет нового.
+- «Общий экран» печатает в удалённую машину по раскладке этой машины, а ⌘Пробел до него не доходит, если его перехватил агент: переключатель на машине-клиенте работает и для удалённой сессии.
 - Автокапитализация macOS делает заглавной первую букву документа — самопроверка поэтому печатает после префикса «x ».
 - `.githooks/prepare-commit-msg` (через `core.hooksPath`) вырезает строки `Co-Authored-By` из сообщений коммитов.
 - У терминала этой машины нет прав «Запись экрана» и «Универсальный доступ»: `screencapture` и синтетические щелчки и нажатия из shell не работают. Вид окна настроек — через `KS_SETTINGS_SHOT`, щелчки и запись сочетаний в окне проверяет пользователь.

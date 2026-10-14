@@ -59,6 +59,9 @@ pub struct Agent {
     autostart_unsupported_logged: AtomicBool,
     /// Агент перезапускается: цикл событий выходит.
     quit: AtomicBool,
+    /// Найденное обновление; ставится только командой меню.
+    update: Mutex<Option<crate::update::Release>>,
+    installing: AtomicBool,
 }
 
 impl Agent {
@@ -87,6 +90,8 @@ impl Agent {
             windows: Mutex::new(Vec::new()),
             autostart_unsupported_logged: AtomicBool::new(false),
             quit: AtomicBool::new(false),
+            update: Mutex::new(None),
+            installing: AtomicBool::new(false),
         }
     }
 
@@ -108,8 +113,10 @@ impl Agent {
     /// Просит недостающие права (системный диалог), поднимает перехват, таймер ручного
     /// управления и слежение за файлом настроек.
     pub fn start(self: &Arc<Self>) {
+        let mut missing = false;
         for p in self.backend.permissions() {
             if !p.granted {
+                missing = true;
                 log::warn!(
                     "нет права {:?}: замена отключена до выдачи и перезапуска",
                     p.kind
@@ -117,11 +124,18 @@ impl Agent {
                 self.backend.request_permission(p.kind);
             }
         }
+        #[cfg(target_os = "macos")]
+        if missing {
+            self.restart_when_granted();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = missing;
         let handler: Arc<dyn KeyHandler> = self.handler.clone();
         if let Err(e) = self.backend.start(handler) {
             log::error!("перехват клавиатуры не поднят: {e}");
         }
         crate::timer::spawn(self.handler.clone(), self.backend.clone());
+        self.watch_updates();
         self.watch_config();
         self.on_start();
     }
@@ -254,10 +268,11 @@ impl Agent {
     }
 
     /// Команда меню: правила пишутся в файл, «Настройки…» — отдельный процесс.
-    pub fn command(&self, cmd: &TrayCommand) -> Flow {
+    pub fn command(self: &Arc<Self>, cmd: &TrayCommand) -> Flow {
         match cmd {
             TrayCommand::Quit => return Flow::Quit,
             TrayCommand::OpenSettings => self.open_settings(None),
+            TrayCommand::InstallUpdate => self.install_update(),
             _ => self.edit_and_save(|h| h.command(cmd)),
         }
         Flow::Continue
@@ -292,6 +307,69 @@ impl Agent {
         self.model(secure)
     }
 
+    /// Через 30 с после старта и затем раз в сутки: есть ли новая версия (если не выключено).
+    fn watch_updates(self: &Arc<Self>) {
+        let agent = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("ks-updates".to_owned())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                loop {
+                    let Some(agent) = agent.upgrade() else {
+                        return;
+                    };
+                    if agent.quit_requested() {
+                        return;
+                    }
+                    if agent.handler.config().check_updates
+                        && let Some(release) = crate::update::check()
+                    {
+                        log::info!("найдена версия {}", release.version);
+                        *lock(&agent.update) = Some(release);
+                    }
+                    drop(agent);
+                    std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
+                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("проверка обновлений не поднята: {e}");
+        }
+    }
+
+    /// Нажатие «Обновить»: macOS — скачать, подменить бандл и перезапуститься; иначе (или если
+    /// не вышло) — открыть страницу релизов.
+    fn install_update(self: &Arc<Self>) {
+        let Some(release) = lock(&self.update).clone() else {
+            return;
+        };
+        if self.installing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let agent = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("ks-install".to_owned())
+            .spawn(move || {
+                #[cfg(target_os = "macos")]
+                match crate::update::install(&release) {
+                    Ok(()) => {
+                        log::info!("версия {} установлена, перезапуск", release.version);
+                        if let Err(e) = agent.restart() {
+                            log::warn!("перезапуск после обновления: {e}");
+                        }
+                        return;
+                    }
+                    Err(e) => log::warn!("обновление не установлено: {e}"),
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = &release;
+                crate::update::open_page();
+                agent.installing.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            self.installing.store(false, Ordering::SeqCst);
+        }
+    }
+
     fn model(&self, secure: bool) -> TrayModel {
         let engine = self.handler.status();
         let status = tray_status(
@@ -311,6 +389,7 @@ impl Agent {
             autocorrect: self.handler.autocorrect(),
             focused_app,
             undone_word: self.handler.undone_word(),
+            update: lock(&self.update).as_ref().map(|r| r.version.clone()),
             config_error: match engine {
                 EngineStatus::ConfigError(e) => Some(e),
                 _ => None,
@@ -358,15 +437,46 @@ impl Agent {
         }
     }
 
-    /// «Перезапустить KeySwitcher» из окна: отвязанный процесс ждёт выхода агента и открывает
-    /// KeySwitcher.app заново, цикл событий агента выходит.
+    /// Выданное право TCC действует только в новом процессе, а системное «Выйти и открыть снова»
+    /// агента не возвращает. Пока прав нет, свежий процесс `keyswitcher --permissions` раз в
+    /// [`GRANT_POLL`] смотрит их заново; выданы — агент перезапускается сам.
+    #[cfg(target_os = "macos")]
+    fn restart_when_granted(self: &Arc<Self>) {
+        let agent = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("ks-grant-watch".to_owned())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(GRANT_POLL);
+                    let Some(agent) = agent.upgrade() else {
+                        return;
+                    };
+                    if agent.quit_requested() {
+                        return;
+                    }
+                    if !fresh_process_granted() {
+                        continue;
+                    }
+                    log::info!("права выданы: перезапуск, чтобы они вступили в силу");
+                    if let Err(e) = agent.restart() {
+                        log::warn!("перезапуск после выдачи прав не удался: {e}");
+                    }
+                    return;
+                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("слежение за выдачей прав не поднято: {e}");
+        }
+    }
+
+    /// Перезапуск («Перезапустить KeySwitcher» из окна, выданные права): новый экземпляр
+    /// KeySwitcher.app ждёт освобождения сокета, цикл событий этого агента выходит.
     #[cfg(target_os = "macos")]
     fn restart(&self) -> Result<(), String> {
         let bundle =
             ks_macos::bundle::current_bundle().ok_or("агент запущен не из KeySwitcher.app")?;
-        ks_macos::bundle::relaunch_after_exit(std::process::id(), &bundle)
-            .map_err(|e| e.to_string())?;
-        log::info!("перезапуск по просьбе окна настроек");
+        ks_macos::bundle::open_new_instance(&bundle).map_err(|e| e.to_string())?;
+        log::info!("перезапуск: новый экземпляр запущен, этот выходит");
         self.quit.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -382,7 +492,9 @@ impl Agent {
             return Ok(());
         };
         let agent = self.clone();
-        crate::ipc::serve(&path, move |cmd, stream| agent.respond(cmd, stream))?;
+        crate::ipc::serve(&path, RELAUNCH_WAIT, move |cmd, stream| {
+            agent.respond(cmd, stream)
+        })?;
         Ok(())
     }
 
@@ -405,6 +517,26 @@ fn spawn_settings(section: Option<Section>) -> std::io::Result<Option<Child>> {
     }
     cmd.spawn().map(Some)
 }
+
+/// Как часто свежий процесс проверяет, не выданы ли права.
+#[cfg(target_os = "macos")]
+const GRANT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Все права, как их видит новый процесс `keyswitcher --permissions`.
+#[cfg(target_os = "macos")]
+fn fresh_process_granted() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    std::process::Command::new(exe)
+        .arg("--permissions")
+        .output()
+        .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"granted")
+}
+
+/// Сколько новый агент ждёт, пока прежний освободит сокет: при перезапуске они пересекаются.
+#[cfg(unix)]
+const RELAUNCH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Как часто опрашивается безопасный ввод и обновляется иконка.
 const REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
@@ -451,9 +583,8 @@ pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
             }
         }
         if agent.quit_requested() {
-            if let Some(path) = paths::agent_socket() {
-                let _ = std::fs::remove_file(path);
-            }
+            // перезапуск: новый экземпляр уже мог поднять сокет по тому же пути — файл не трогаем,
+            // устаревший он удалит сам перед bind
             *control_flow = ControlFlow::Exit;
             return;
         }
@@ -531,11 +662,19 @@ pub fn run(backend: Arc<dyn Backend>) -> anyhow::Result<()> {
 /// macOS и Windows.
 #[cfg(target_os = "linux")]
 fn linux_tray_view(model: &TrayModel) -> ks_linux::tray::TrayView {
-    use ks_linux::tray::{TrayEntry, TrayView};
+    use ks_linux::tray::{Pixmap, TrayEntry, TrayView};
 
     use crate::status::{MenuEntry, menu_entries, tooltip};
 
     TrayView {
+        icon: crate::tray_art::linux(model.status)
+            .into_iter()
+            .map(|art| Pixmap {
+                width: art.width,
+                height: art.height,
+                rgba: art.rgba,
+            })
+            .collect(),
         tooltip: tooltip(model.status),
         entries: menu_entries(model)
             .into_iter()

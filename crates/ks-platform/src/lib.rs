@@ -113,6 +113,8 @@ pub struct TrayModel {
     pub focused_app: Option<(AppId, String, bool)>,
     pub undone_word: Option<String>,
     pub config_error: Option<String>,
+    /// Версия найденного обновления («0.1.1»).
+    pub update: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +123,8 @@ pub enum TrayCommand {
     ToggleApp(AppId),
     NeverWord(String),
     OpenSettings,
+    /// Установить найденное обновление (кнопка в меню).
+    InstallUpdate,
     Quit,
 }
 

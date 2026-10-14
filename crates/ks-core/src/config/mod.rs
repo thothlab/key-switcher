@@ -41,6 +41,8 @@ pub struct Config {
     pub autocorrect: bool,
     pub single_shift_switch: bool,
     pub autostart: bool,
+    /// Раз в сутки спрашивать GitHub о новой версии; ставится только по кнопке.
+    pub check_updates: bool,
     pub hotkeys: HotkeyConfig,
     pub apps: AppRules,
     pub words: WordRules,
@@ -109,6 +111,7 @@ impl Config {
             // на macOS умолчания как в Punto Switcher: раскладка — ⌘Пробел, не одиночный Shift
             single_shift_switch: os != Os::MacOs,
             autostart: true,
+            check_updates: true,
             hotkeys: HotkeyConfig::default_for(os),
             apps: AppRules::default(),
             words: WordRules::default(),
@@ -265,7 +268,13 @@ fn unknown_keys(text: &str) -> Vec<String> {
         ("apps", &["enabled", "disabled"]),
         ("words", &["never"]),
     ];
-    const SCALARS: [&str; 4] = ["version", "autocorrect", "single_shift_switch", "autostart"];
+    const SCALARS: [&str; 5] = [
+        "version",
+        "autocorrect",
+        "single_shift_switch",
+        "autostart",
+        "check_updates",
+    ];
     let Ok(table) = text.parse::<toml::Table>() else {
         return Vec::new();
     };

@@ -112,6 +112,10 @@ fn status_of_a_working_agent_names_capture_layouts_and_secure_input() {
         "{text}"
     );
     assert!(text.contains("pid 42"), "{text}");
+    assert!(
+        text.contains("текущая раскладка: com.apple.keylayout.US\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -158,8 +162,9 @@ fn embedded_selftest_scenarios_cover_this_task() {
 #[test]
 fn status_is_answered_by_the_running_agent_over_its_socket_and_only_one_agent_listens() {
     use std::io::Write;
+    use std::time::Duration;
     let path = std::env::temp_dir().join(format!("ks-test-{}.sock", std::process::id()));
-    ks_app::ipc::serve(&path, |cmd, out| {
+    ks_app::ipc::serve(&path, Duration::ZERO, |cmd, out| {
         let _ = writeln!(out, "команда: {cmd}");
         let _ = writeln!(out, "клавиатура отслеживается");
     })
@@ -167,8 +172,24 @@ fn status_is_answered_by_the_running_agent_over_its_socket_and_only_one_agent_li
     let mut lines = Vec::new();
     ks_app::ipc::ask(&path, "status", |l| lines.push(l.to_owned())).expect("агент ответил");
     assert_eq!(lines, ["команда: status", "клавиатура отслеживается"]);
-    let second = ks_app::ipc::serve(&path, |_, _| {});
+    let second = ks_app::ipc::serve(&path, Duration::ZERO, |_, _| {});
     assert_eq!(second.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn restarted_agent_waits_until_the_previous_one_releases_the_socket() {
+    use std::time::Duration;
+    let path = std::env::temp_dir().join(format!("ks-test-relaunch-{}.sock", std::process::id()));
+    ks_app::ipc::serve(&path, Duration::ZERO, |_, _| {}).expect("прежний агент");
+    let released = path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::fs::remove_file(&released);
+    });
+    ks_app::ipc::serve(&path, Duration::from_secs(5), |_, _| {})
+        .expect("новый агент дождался, пока прежний уйдёт");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -198,7 +219,7 @@ fn silent_client_does_not_block_the_agent_socket() {
     use std::time::Duration;
     let path = std::env::temp_dir().join(format!("ks-test-silent-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    ks_app::ipc::serve(&path, |_, out| {
+    ks_app::ipc::serve(&path, Duration::ZERO, |_, out| {
         let _ = writeln!(out, "клавиатура отслеживается");
     })
     .expect("сокет поднят");
@@ -256,4 +277,44 @@ fn cmd_z_token_is_a_chord_with_a_separate_modifier_press() {
         ..s
     };
     assert!(bad.strokes().is_err(), "неизвестный модификатор — отказ");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn every_tray_state_has_a_black_template_icon_at_2x() {
+    for status in ks_app::tray_art::ALL {
+        let art = ks_app::tray_art::macos(status).expect("растр значка");
+        assert_eq!((art.width, art.height), (36, 36), "{status:?}");
+        assert!(
+            art.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[..3] == [0, 0, 0] || p[3] == 0),
+            "шаблон строки меню — только чёрный с альфой: {status:?}"
+        );
+        assert!(
+            art.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn newer_release_is_found_in_the_github_list_and_the_asset_matches_this_os() {
+    use ks_app::update::{is_newer, parse_latest};
+    let json = r#"[{"tag_name": "v0.1.10", "assets": [
+        {"browser_download_url": "https://x/KeySwitcher-0.1.10-macos-universal.dmg"},
+        {"browser_download_url": "https://x/KeySwitcher-0.1.10-windows-x86_64.zip"},
+        {"browser_download_url": "https://x/KeySwitcher-0.1.10-linux-x86_64.tar.gz"}]},
+        {"tag_name": "v0.1.9", "assets": []}]"#;
+    let release = parse_latest(json).expect("релиз");
+    assert_eq!(release.version, "0.1.10");
+    assert!(release.asset.expect("файл").contains("0.1.10"));
+    assert!(
+        is_newer("0.1.10", "0.1.9"),
+        "сравнение по числам, не по строке"
+    );
+    assert!(!is_newer("0.1.1", "0.1.1"));
+    assert!(!is_newer("0.1.0", "0.1.1"));
 }

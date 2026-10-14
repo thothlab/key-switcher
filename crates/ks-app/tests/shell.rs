@@ -617,8 +617,10 @@ fn start_without_permissions_opens_the_window_on_permissions_once() {
 #[test]
 fn menu_settings_command_launches_the_window() {
     let (launcher, opened) = recording_launcher();
-    let a = Agent::with_config_path(FakeBackend::new(true), Some(config_path("menu-settings")))
-        .with_launcher(launcher);
+    let a = Arc::new(
+        Agent::with_config_path(FakeBackend::new(true), Some(config_path("menu-settings")))
+            .with_launcher(launcher),
+    );
     a.command(&TrayCommand::OpenSettings);
     assert_eq!(*opened.lock().unwrap(), vec![None]);
 }

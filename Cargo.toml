@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -76,6 +76,8 @@ tao = "0.37"
 
 notify = "8"
 eframe = "0.36"
+# растры значка трея (уже в дереве через tray-icon)
+png = "0.18"
 
 # только tools/ks-datagen
 ureq = "3"

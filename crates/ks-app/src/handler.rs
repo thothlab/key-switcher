@@ -163,7 +163,9 @@ impl EngineHandler {
                 }
                 state.undone_word = None;
             }
-            TrayCommand::OpenSettings | TrayCommand::Quit => return false,
+            TrayCommand::OpenSettings | TrayCommand::InstallUpdate | TrayCommand::Quit => {
+                return false;
+            }
         }
         engine.set_config(state.config.clone());
         self.sync_deadline(&engine);

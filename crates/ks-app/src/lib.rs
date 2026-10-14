@@ -10,6 +10,8 @@ pub mod status;
 pub mod timer;
 #[cfg(any(target_os = "macos", windows))]
 pub mod tray;
+pub mod tray_art;
+pub mod update;
 pub mod watch;
 
 pub mod agent;
