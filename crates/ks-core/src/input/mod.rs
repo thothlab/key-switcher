@@ -343,6 +343,17 @@ impl InputState {
                     if *key == ev.key && same_mods(*mods, ev.mods))
             })
         };
+        let command = command.filter(|c| {
+            let nowhere =
+                *c == Command::SwitchLayout && switch_target(view.layouts, view.layout).is_none();
+            if nowhere {
+                log::warn!(
+                    "«Сменить раскладку»: текущий источник ввода не из пары EN + RU — нажатие \
+                     пропущено в приложение"
+                );
+            }
+            !nowhere
+        });
         if command != Some(Command::UndoOrConvertWord) && !is_undo_modifier(ev.key, view.os) {
             // первое нажатие, отличное от Shift, закрывает окно отмены и забывает слово;
             // Cmd/Ctrl стандартного «отменить» — нет, иначе ⌘Z/Ctrl+Z до окна не доживёт

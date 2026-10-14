@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use ks_core::{
-    Action, Config, Context, Disposition, Engine, KeyDir, KeyStroke, LayoutMap, Modifiers, Os,
-    Outcome, PhysicalKey as K, ReplaceKind, ResetReason, WordRules,
+    Action, Config, Context, Disposition, Engine, KeyDir, KeyStroke, LayoutId, LayoutMap,
+    Modifiers, Os, Outcome, PhysicalKey as K, ReplaceKind, ResetReason, WordRules,
 };
 
 const GHBDTN: [K; 6] = [K::KeyG, K::KeyH, K::KeyB, K::KeyD, K::KeyT, K::KeyN];
@@ -648,6 +648,24 @@ fn cmd_space_switches_the_layout_and_is_swallowed() {
         key_at(&mut e, &c, K::Space, KeyDir::Down, meta(), 2_010)
     };
     assert_eq!(back.actions, vec![Action::SwitchLayout(us.id.clone())]);
+}
+
+#[test]
+fn cmd_space_from_a_source_outside_the_pair_passes_through() {
+    let (us, ru) = (us(), ru_pc());
+    let mut e = engine_with(punto(), vec![us.clone(), ru.clone()]);
+    let c = Context {
+        layout: LayoutId("com.apple.inputmethod.Kotoeri".into()),
+        ..ctx(&us)
+    };
+    key_at(&mut e, &c, K::MetaLeft, KeyDir::Down, meta(), 1_000);
+    let down = key_at(&mut e, &c, K::Space, KeyDir::Down, meta(), 1_010);
+    assert_eq!(
+        down.disposition,
+        Disposition::Pass,
+        "переключать некуда: нажатие не пропадает молча"
+    );
+    assert!(down.actions.is_empty(), "{:?}", down.actions);
 }
 
 #[test]

@@ -92,24 +92,20 @@ pub fn apply_launch_agent(file: &Path, exe: &Path, on: bool) -> io::Result<bool>
     Ok(true)
 }
 
-/// Перезапуск: отвязанный `sh` ждёт фактического выхода процесса `pid` — без срока: открыть
-/// бандл поверх живого агента значит активировать уходящий экземпляр — и открывает `bundle`
-/// заново. Своя группа процессов — чтобы `launchd` не снял `sh` вместе с агентом; ошибки `sh`
-/// идут в stderr агента.
+/// Новый экземпляр бандла (`open -n -g`) для перезапуска. Его запускает LaunchServices, а не
+/// этот процесс: потомков приложения macOS снимает вместе с ним, и ждущий выхода `sh` не доживал
+/// до `open`. Новый агент сам ждёт, пока прежний освободит сокет.
 #[cfg(unix)]
-pub fn relaunch_after_exit(pid: u32, bundle: &Path) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    const SCRIPT: &str =
-        "while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open \"$1\"";
-    Command::new("/bin/sh")
-        .arg("-c")
-        .arg(SCRIPT)
-        .arg(pid.to_string())
+pub fn open_new_instance(bundle: &Path) -> io::Result<()> {
+    let status = Command::new("/usr/bin/open")
+        .args(["-n", "-g"])
         .arg(bundle)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .process_group(0)
-        .spawn()
-        .map(drop)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("open завершился: {status}")))
+    }
 }

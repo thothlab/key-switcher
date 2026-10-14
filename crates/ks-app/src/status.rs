@@ -89,6 +89,15 @@ pub fn menu_entries(model: &TrayModel) -> Vec<MenuEntry> {
             None,
         ));
     }
+    if let Some(version) = &model.update {
+        menu.push(MenuEntry::Separator);
+        let label = if cfg!(target_os = "macos") {
+            format!("Обновить до версии {version}")
+        } else {
+            format!("Доступна версия {version}: скачать")
+        };
+        menu.push(item(label, Some(TrayCommand::InstallUpdate), None));
+    }
     menu.push(MenuEntry::Separator);
     menu.push(item(
         "Настройки…".to_owned(),
@@ -170,6 +179,22 @@ pub fn report(backend: &dyn Backend, engine: Option<&EngineStatus>, source: Sour
     let layouts = backend.layouts();
     if layouts.pair().is_none() {
         out += "  нет пары EN + RU — Нужны раскладки RU и EN\n";
+    }
+    let current = backend.current_layout();
+    if layouts.get(&current).is_some() {
+        let _ = writeln!(out, "текущая раскладка: {}", current.0);
+    } else {
+        // «Сменить раскладку» считает вторую раскладку пары от текущей: от источника ввода не
+        // из списка (метод ввода, эмодзи) переключать некуда
+        let _ = writeln!(
+            out,
+            "текущая раскладка: {} — не из списка, «Сменить раскладку» отсюда не переключит",
+            if current.0.is_empty() {
+                "?"
+            } else {
+                &current.0
+            }
+        );
     }
     if let Some(engine) = engine {
         let state = match engine {

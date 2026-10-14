@@ -69,6 +69,8 @@ fn main() -> ExitCode {
             }
         },
         Some("--status") => status(),
+        // служебная: агент спрашивает права новым процессом (выданное право TCC видно только ему)
+        Some("--permissions") => permissions(),
         Some("--selftest") => selftest(),
         Some("--settings") => settings(&args[1..]),
         Some("--version") => {
@@ -80,6 +82,13 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// «granted» — у этого процесса есть все права, иначе «missing».
+fn permissions() -> ExitCode {
+    let all = backend().permissions().iter().all(|p| p.granted);
+    println!("{}", if all { "granted" } else { "missing" });
+    ExitCode::SUCCESS
 }
 
 /// Состояние из процесса агента; агент не запущен — то, что видно этой команде, с пометкой.

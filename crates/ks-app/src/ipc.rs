@@ -12,16 +12,22 @@ use std::time::Duration;
 /// Сколько сервер ждёт строку-команду от клиента.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Поднимает сокет; `Err(AddrInUse)` — на нём уже отвечает другой агент.
+/// Поднимает сокет; `Err(AddrInUse)` — на нём отвечает другой агент и не ушёл за `wait`
+/// (при перезапуске новый экземпляр стартует, пока прежний ещё выходит).
 pub fn serve(
     path: &Path,
+    wait: Duration,
     respond: impl Fn(&str, &mut UnixStream) + Send + 'static,
 ) -> io::Result<()> {
-    if UnixStream::connect(path).is_ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "агент KeySwitcher уже запущен",
-        ));
+    let deadline = std::time::Instant::now() + wait;
+    while UnixStream::connect(path).is_ok() {
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "агент KeySwitcher уже запущен",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     let _ = std::fs::remove_file(path);
     if let Some(dir) = path.parent() {
