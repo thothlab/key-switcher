@@ -6,6 +6,7 @@ KeySwitcher — автопереключатель раскладки RU↔EN
   ./keyswitcher
 
 Удобно положить keyswitcher и install-udev-rule.sh в ~/.local/bin/.
+Иконка приложения: cp -r icons/hicolor ~/.local/share/icons/
 Откат правила: sudo sh install-udev-rule.sh --uninstall
 Автозапуск — флажок в настройках (меню значка → «Настройки…»); на Sway и Hyprland без
 XDG autostart добавьте exec keyswitcher (Sway) или exec-once = keyswitcher (Hyprland).

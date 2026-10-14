@@ -20,6 +20,28 @@ pub enum TrayEntry {
 pub struct TrayView {
     pub tooltip: String,
     pub entries: Vec<TrayEntry>,
+    /// Значок состояния в нескольких размерах; пусто — значок из темы по [`icon_name`].
+    pub icon: Vec<Pixmap>,
+}
+
+/// Растр значка RGBA 8 бит.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pixmap {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl Pixmap {
+    /// ARGB32 в сетевом порядке байт — формат `IconPixmap` StatusNotifierItem.
+    pub fn argb(&self) -> Vec<u8> {
+        self.rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|[r, g, b, a]| [*a, *r, *g, *b])
+            .collect()
+    }
 }
 
 /// Модель → меню и подсказка; передаёт `ks-app`.

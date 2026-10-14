@@ -104,6 +104,12 @@ jobs:
           cp dist/linux/keyswitcher dist/linux/install-udev-rule.sh pkg/KeySwitcher/
           cp packaging/README-linux.txt pkg/KeySwitcher/README.txt
           cp THIRD_PARTY.md data/licenses/* pkg/KeySwitcher/licenses/
+          for n in 16 22 24 32 48 64 128 256 512; do
+            mkdir -p "pkg/KeySwitcher/icons/hicolor/${n}x${n}/apps"
+            cp "packaging/icons/linux/icon-$n.png" "pkg/KeySwitcher/icons/hicolor/${n}x${n}/apps/keyswitcher.png"
+          done
+          mkdir -p pkg/KeySwitcher/icons/hicolor/scalable/apps
+          cp packaging/icons/linux/icon.svg pkg/KeySwitcher/icons/hicolor/scalable/apps/keyswitcher.svg
           tar -C pkg -czf "pkg/KeySwitcher-$VERSION-linux-x86_64.tar.gz" KeySwitcher
       - uses: actions/upload-artifact@v7
         with:

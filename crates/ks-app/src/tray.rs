@@ -1,6 +1,7 @@
-//! Трей macOS/Windows на `tray-icon`/`muda`: иконка-шаблон по состоянию, подсказка
+//! Трей macOS/Windows на `tray-icon`/`muda`: значок по состоянию ([`crate::tray_art`]), подсказка
 //! «KeySwitcher — …» и меню из [`menu_entries`]. Живёт на главном потоке внутри цикла `tao`;
-//! меню пересобирается, только когда модель изменилась.
+//! меню пересобирается, только когда модель изменилась, значок — когда сменилось состояние
+//! (на Windows ещё и тема панели задач).
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
@@ -18,6 +19,8 @@ pub struct TrayIconHost {
     icon: TrayIcon,
     ids: Commands,
     last: Mutex<Option<TrayModel>>,
+    /// Состояние и тема, под которые нарисован значок.
+    drawn: Mutex<Option<(TrayStatus, bool)>>,
     commands: Mutex<Option<Receiver<TrayCommand>>>,
 }
 
@@ -47,6 +50,7 @@ impl TrayIconHost {
             icon,
             ids,
             last: Mutex::new(None),
+            drawn: Mutex::new(Some((TrayStatus::Working, light_taskbar()))),
             commands: Mutex::new(Some(rx)),
         })
     }
@@ -91,13 +95,10 @@ impl TrayIconHost {
 
 impl TrayHost for TrayIconHost {
     fn update(&self, model: &TrayModel) {
-        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-        if last.as_ref() == Some(model) {
-            return;
-        }
-        let status_changed = last.as_ref().map(|m| m.status) != Some(model.status);
-        if status_changed {
-            let _ = self.icon.set_tooltip(Some(tooltip(model.status)));
+        let wanted = (model.status, light_taskbar());
+        let mut drawn = self.drawn.lock().unwrap_or_else(|e| e.into_inner());
+        if *drawn != Some(wanted) {
+            *drawn = Some(wanted);
             match icon(model.status) {
                 #[cfg(target_os = "macos")]
                 Ok(img) => {
@@ -109,6 +110,14 @@ impl TrayHost for TrayIconHost {
                 }
                 Err(e) => log::warn!("иконка состояния не построена: {e}"),
             }
+        }
+        drop(drawn);
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref() == Some(model) {
+            return;
+        }
+        if last.as_ref().map(|m| m.status) != Some(model.status) {
+            let _ = self.icon.set_tooltip(Some(tooltip(model.status)));
         }
         if let Err(e) = self.rebuild(model) {
             log::warn!("меню не собрано: {e}");
@@ -123,51 +132,26 @@ impl TrayHost for TrayIconHost {
     }
 }
 
-/// Иконка 32×32, чёрная с альфой (шаблон для тёмной и светлой строки меню): клавиша и знак
-/// состояния. Работает — «K»; автоматика выключена — «K» перечёркнута; безопасный ввод —
-/// пауза «‖»; нужны разрешения — «!»; нужны раскладки — «K» в пунктирной рамке; ошибка
-/// настроек — «!» в пунктирной рамке.
-fn icon(status: TrayStatus) -> anyhow::Result<Icon> {
-    const N: u32 = 32;
-    let seg = |px: f32, py: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)| {
-        let (dx, dy) = (bx - ax, by - ay);
-        let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-        ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
-    };
-    let k = |px, py| {
-        seg(px, py, (12.0, 10.0), (12.0, 22.0)) < 1.3
-            || seg(px, py, (12.5, 16.5), (20.0, 10.0)) < 1.3
-            || seg(px, py, (14.5, 15.0), (20.5, 22.0)) < 1.3
-    };
-    let bang = |px, py| {
-        seg(px, py, (16.0, 9.5), (16.0, 18.0)) < 1.5
-            || seg(px, py, (16.0, 21.5), (16.0, 21.6)) < 1.7
-    };
-    let pause = |px, py| {
-        seg(px, py, (12.5, 10.0), (12.5, 22.0)) < 1.6
-            || seg(px, py, (19.5, 10.0), (19.5, 22.0)) < 1.6
-    };
-    let slash = |px, py| seg(px, py, (6.0, 25.0), (26.0, 7.0)) < 1.2;
-    let dashed = matches!(status, TrayStatus::NeedsLayouts | TrayStatus::ConfigError);
-    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
-    for y in 0..N {
-        for x in 0..N {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let in_box = (3.0..29.0).contains(&px) && (5.0..27.0).contains(&py);
-            let inner = (5.0..27.0).contains(&px) && (7.0..25.0).contains(&py);
-            let gap = dashed
-                && ((x / 3) % 2 == 1 && !(7..25).contains(&y)
-                    || (y / 3) % 2 == 1 && !(5..27).contains(&x));
-            let border = in_box && !inner && !gap;
-            let glyph = match status {
-                TrayStatus::Working | TrayStatus::NeedsLayouts => k(px, py),
-                TrayStatus::AutocorrectOff => k(px, py) || slash(px, py),
-                TrayStatus::SecureInput => pause(px, py),
-                TrayStatus::NeedsPermissions | TrayStatus::ConfigError => bang(px, py),
-            };
-            let alpha = if border || glyph { 255 } else { 0 };
-            rgba.extend_from_slice(&[0, 0, 0, alpha]);
-        }
+/// Панель задач Windows светлая: значок рисуется тёмным. На macOS значок — шаблон, тема не важна.
+fn light_taskbar() -> bool {
+    #[cfg(windows)]
+    {
+        ks_windows::taskbar_light()
     }
-    Ok(Icon::from_rgba(rgba, N, N)?)
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Значок состояния (`design/icons/tray`): macOS — чёрный шаблон 36×36, Windows — вариант под
+/// тему панели задач и размер малого значка.
+fn icon(status: TrayStatus) -> anyhow::Result<Icon> {
+    #[cfg(target_os = "macos")]
+    let art = crate::tray_art::macos(status);
+    #[cfg(windows)]
+    let art = crate::tray_art::windows(status, light_taskbar(), ks_windows::small_icon_px());
+    let art =
+        art.ok_or_else(|| anyhow::anyhow!("нет растра значка {}", crate::tray_art::stem(status)))?;
+    Ok(Icon::from_rgba(art.rgba, art.width, art.height)?)
 }

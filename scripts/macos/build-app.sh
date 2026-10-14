@@ -26,9 +26,20 @@ else
     BIN="$TARGET_DIR/release/keyswitcher"
 fi
 
-# Бандл перезаписывается на месте: бинарник, Info.plist, подпись.
+# Бандл перезаписывается на месте: бинарник, иконка, Info.plist, подпись.
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -f "$BIN" "$APP/Contents/MacOS/keyswitcher"
+
+# Иконка — колпачок «A / Ф» из design/ (packaging/icons/macos): размеры по схеме iconset,
+# все десять файлов перезаписываются при каждой сборке.
+ICONSET="$TARGET_DIR/KeySwitcher.iconset"
+ICONS=packaging/icons/macos
+mkdir -p "$ICONSET"
+for pair in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x \
+    256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x; do
+    cp -f "$ICONS/icon-${pair%%:*}.png" "$ICONSET/icon_${pair#*:}.png"
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/KeySwitcher.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -37,6 +48,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>KeySwitcher</string>
     <key>CFBundleDisplayName</key><string>KeySwitcher</string>
     <key>CFBundleExecutable</key><string>keyswitcher</string>
+    <key>CFBundleIconFile</key><string>KeySwitcher</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>

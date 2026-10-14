@@ -20,8 +20,8 @@ use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW,
-    RegGetValueW, RegSetKeyValueW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -32,8 +32,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_UNICODE, SendInput, ToUnicodeEx, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, PostMessageW,
-    WM_INPUTLANGCHANGEREQUEST,
+    GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetSystemMetrics,
+    GetWindowThreadProcessId, PostMessageW, SM_CXSMICON, WM_INPUTLANGCHANGEREQUEST,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -107,6 +107,40 @@ fn translate(hkl: isize, vk: u16, scan: u16, level: Level) -> Option<char> {
         };
     }
     layouts::printable_char(&buf, n)
+}
+
+fn reg_dword(root: HKEY, sub: &str, value: &str) -> Option<u32> {
+    let (sub, value) = (wide(sub), wide(value));
+    let mut data = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(sub.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut data as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    (rc == ERROR_SUCCESS).then_some(data)
+}
+
+/// Панель задач светлая (`SystemUsesLightTheme`); значения нет — тёмная, как в Windows по
+/// умолчанию.
+pub fn taskbar_light() -> bool {
+    reg_dword(
+        HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "SystemUsesLightTheme",
+    )
+    .is_some_and(|v| v != 0)
+}
+
+/// Сторона малого значка (трей) в пикселях с учётом масштаба системы.
+pub fn small_icon_px() -> u32 {
+    unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32
 }
 
 fn reg_string(root: HKEY, sub: &str, value: &str) -> Option<String> {

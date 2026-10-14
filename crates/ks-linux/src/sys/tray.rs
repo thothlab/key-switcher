@@ -33,8 +33,25 @@ impl ksni::Tray for Sni {
         "KeySwitcher".to_owned()
     }
 
+    /// Пусто, когда есть свой растр: иначе хост возьмёт значок из темы и растр не покажет.
     fn icon_name(&self) -> String {
-        icon_name(self.status).to_owned()
+        if self.view.icon.is_empty() {
+            icon_name(self.status).to_owned()
+        } else {
+            String::new()
+        }
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.view
+            .icon
+            .iter()
+            .map(|p| ksni::Icon {
+                width: p.width as i32,
+                height: p.height as i32,
+                data: p.argb(),
+            })
+            .collect()
     }
 
     fn status(&self) -> ksni::Status {

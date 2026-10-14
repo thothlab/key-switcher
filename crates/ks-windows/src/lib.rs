@@ -16,7 +16,7 @@ pub mod tap;
 #[cfg(windows)]
 mod sys;
 #[cfg(windows)]
-pub use sys::WindowsBackend;
+pub use sys::{WindowsBackend, small_icon_px, taskbar_light};
 
 #[cfg(not(windows))]
 mod stub;

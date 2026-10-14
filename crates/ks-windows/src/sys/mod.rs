@@ -6,3 +6,4 @@ mod backend;
 mod system;
 
 pub use backend::WindowsBackend;
+pub use system::{small_icon_px, taskbar_light};
