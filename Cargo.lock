@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "ks-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "directories",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "ks-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ks-data",
  "log",
@@ -2410,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "ks-data"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "fst",
@@ -2419,7 +2419,7 @@ dependencies = [
 
 [[package]]
 name = "ks-datagen"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "ks-eval"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "ks-core",
@@ -2438,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "ks-linux"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "evdev",
  "ks-core",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "ks-macos"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.1",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "ks-platform"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ks-core",
  "log",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "ks-settings"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "ks-windows"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ks-core",
  "ks-platform",
